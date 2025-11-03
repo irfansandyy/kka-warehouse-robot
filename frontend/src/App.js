@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, useMemo, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import axios from "axios";
 
 const BACKEND = "http://localhost:5001/api";
@@ -118,7 +118,7 @@ export default function App(){
   const [stats, setStats] = useState({});
   const [robotPositions, setRobotPositions] = useState([]);
   const [simPlaying, setSimPlaying] = useState(false);
-  const [speed, setSpeed] = useState(6); // cells per second
+  const [speed, setSpeed] = useState(6);
   const [simTime, setSimTime] = useState(0);
   const rafRef = useRef(null);
   const timeRef = useRef(0);
@@ -141,7 +141,7 @@ export default function App(){
 
   async function planTasks(){
     setStatus("planning");
-    const body = { grid, robots, tasks, optimizer, path_alg: selectedAlg==="astar" ? "astar" : selectedAlg==="theta" ? "theta" : "dijkstra" };
+    const body = { grid, robots, tasks, optimizer, path_alg: selectedAlg==="astar" ? "astar" : "dijkstra" };
     const res = await axios.post(BACKEND + "/plan_tasks", body);
     setStatus("planned");
     setStats(res.data.costs);
@@ -158,7 +158,7 @@ export default function App(){
       robot_plans[JSON.stringify(rid)] = assignResp.assigned[k];
       i++;
     }
-    const body = { grid, robot_plans, alg: selectedAlg==="astar"?"astar": selectedAlg==="theta"?"theta":"dijkstra", moving };
+    const body = { grid, robot_plans, alg: selectedAlg === "astar" ? "astar" : "dijkstra", moving };
     const res = await axios.post(BACKEND + "/compute_paths", body);
     if(!res.data.ok){
       alert("Compute paths failed: " + JSON.stringify(res.data));
@@ -254,7 +254,6 @@ export default function App(){
             <option value="local">Local Search</option>
           </select>
           <select value={selectedAlg} onChange={e=>setSelectedAlg(e.target.value)}>
-            <option value="theta">Theta*</option>
             <option value="astar">A*</option>
             <option value="dijkstra">Dijkstra</option>
           </select>

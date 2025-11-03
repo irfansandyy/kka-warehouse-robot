@@ -86,68 +86,11 @@ def astar(grid, start, goal, heuristic=manhattan):
                 heapq.heappush(openh, (tentative + heuristic(nb,goal), tentative, nb))
     return [], nodes, time.perf_counter()-t0
 
-def line_of_sight(grid, a, b):
-    (x0,y0) = (a[1], a[0]); (x1,y1) = (b[1], b[0])
-    dx = abs(x1-x0); dy = abs(y1-y0)
-    x = x0; y = y0
-    n = 1 + dx + dy
-    x_inc = 1 if x1>x0 else -1
-    y_inc = 1 if y1>y0 else -1
-    error = dx - dy
-    dx *= 2; dy *= 2
-    for _ in range(n):
-        if grid[y][x]==1:
-            return False
-        if error > 0:
-            x += x_inc
-            error -= dy
-        else:
-            y += y_inc
-            error += dx
-    return True
-
-def theta_star(grid, start, goal):
-    t0=time.perf_counter()
-    openh=[]
-    parent={}
-    g={}
-    parent[start]=start
-    g[start]=0.0
-    heapq.heappush(openh, (euclid(start,goal), start))
-    closed=set()
-    nodes=0
-    while openh:
-        _, s = heapq.heappop(openh)
-        if s in closed: continue
-        nodes += 1
-        if s==goal:
-            path=[s]
-            while s!=parent[s]:
-                s=parent[s]; path.append(s)
-            path.reverse()
-            return path, nodes, time.perf_counter()-t0
-        closed.add(s)
-        for nb in neighbors4(s):
-            if grid[nb[0]][nb[1]]==1: continue
-            ps = parent[s]
-            if line_of_sight(grid, ps, nb):
-                alt = g[ps] + euclid(ps, nb)
-                cand_par = ps
-            else:
-                alt = g[s] + euclid(s, nb)
-                cand_par = s
-            if alt < g.get(nb, 1e12):
-                g[nb]=alt
-                parent[nb]=cand_par
-                heapq.heappush(openh, (alt + euclid(nb,goal), nb))
-    return [], nodes, time.perf_counter()-t0
-
 def dijkstra(grid, start, goal):
     return astar(grid, start, goal, heuristic=lambda a,b: 0)
 
 def path_cost(grid, a, b, alg):
     if alg=="astar": p,_,_ = astar(grid,a,b); return len(p) if p else 1e6
-    if alg=="theta": p,_,_ = theta_star(grid,a,b); return len(p) if p else 1e6
     if alg=="dijkstra": p,_,_ = dijkstra(grid,a,b); return len(p) if p else 1e6
     return 1e6
 
@@ -276,13 +219,26 @@ def generate_moving_obstacles(grid, count=3):
     return obs
 
 def csp_schedule(paths, moving_obstacles, max_offset=20):
-    max_t = 200
-    obstruct=set()
+    max_path_len = 0
+    for seq in paths.values():
+        if isinstance(seq, list):
+            max_path_len = max(max_path_len, len(seq))
+    horizon = int(max_offset + max_path_len + 10)
+
+    obstruct = set()
+    obstruct_edges = set()
     for ob in moving_obstacles:
-        p = ob["path"]; L=len(p)
-        for t in range(max_t):
-            pos = p[t%L]
-            obstruct.add((pos, t))
+        p = ob.get("path", [])
+        L = len(p)
+        if L == 0:
+            continue
+        for t in range(horizon+1):
+            a = p[t % L]
+            obstruct.add((a, t))
+            b = p[(t+1) % L] if L > 1 else a
+            if a != b:
+                obstruct_edges.add((a, b, t))
+
     robots = list(paths.keys())
     assigned = {}
     def backtrack(idx):
@@ -296,6 +252,12 @@ def csp_schedule(paths, moving_obstacles, max_offset=20):
                 t = s + k
                 if (cell, t) in obstruct:
                     bad=True; break
+            if bad: continue
+            for k in range(len(P)-1):
+                a = P[k]; b = P[k+1]
+                t = s + k
+                if (b, a, t) in obstruct_edges:
+                    bad = True; break
             if bad: continue
             for other,so in assigned.items():
                 Po = paths[other]
@@ -345,10 +307,6 @@ def api_generate_map():
 
 @app.route('/api/plan_tasks', methods=['POST'])
 def api_plan_tasks():
-    """
-    Body: {grid, robots, tasks, optimizer: 'greedy'/'ga'/'local', path_alg: 'astar'/'theta'/'dijkstra'}
-    Returns assigned tasks per robot and costs.
-    """
     body = request.get_json()
     grid = body["grid"]; robots = [tuple(r) for r in body["robots"]]; tasks = [tuple(t) for t in body["tasks"]]
     optimizer = body.get("optimizer","greedy"); alg = body.get("path_alg","astar")
@@ -363,7 +321,7 @@ def api_plan_tasks():
         cur=r; tot=0; legs=[]
         for t in lst:
             cost = path_cost(grid, cur, t, alg)
-            p,_,_ = (astar if alg=="astar" else theta_star if alg=="theta" else dijkstra)(grid, cur, t)
+            p,_,_ = (astar if alg=="astar" else dijkstra)(grid, cur, t)
             legs.append({"to":t, "cost":cost, "path":p})
             tot += cost
             cur = t
@@ -373,10 +331,6 @@ def api_plan_tasks():
 
 @app.route('/api/compute_paths', methods=['POST'])
 def api_compute_paths():
-    """
-    Body: {grid, robot_plans: {robot:[sequence of cells]}, alg: 'astar'|'theta'|'dijkstra'}
-    Returns: per-robot full path (sequence) and per-leg stats, and CSP schedule attempt
-    """
     body = request.get_json()
     grid = body["grid"]
     rp_in = body["robot_plans"]
@@ -392,8 +346,6 @@ def api_compute_paths():
             t = parse_cell(t)
             if alg=="astar":
                 p,n,tt = astar(grid, cur, t)
-            elif alg=="theta":
-                p,n,tt = theta_star(grid, cur, t)
             else:
                 p,n,tt = dijkstra(grid, cur, t)
             if not p:
