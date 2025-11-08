@@ -58,7 +58,8 @@ def generate_warehouse(seed=None, obstacle_density=0.12):
         grid[r][0]=0; grid[r][GRID_W-1]=0
     return grid
 
-def astar(grid, start, goal, heuristic=manhattan):
+#fixed astar
+def astar(grid, start, goal, heuristic=manhattan, dynamic_obstacles=None):
     t0 = time.perf_counter()
     openh = []
     heapq.heappush(openh, (heuristic(start,goal), 0, start))
@@ -66,6 +67,10 @@ def astar(grid, start, goal, heuristic=manhattan):
     gscore={start:0}
     closed=set()
     nodes=0
+    
+    dyn_obs_set = set()
+    if dynamic_obstacles: dyn_obs_set = set(dynamic_obstacles)
+    
     while openh:
         f,g,cur = heapq.heappop(openh)
         if cur in closed: continue
@@ -79,6 +84,10 @@ def astar(grid, start, goal, heuristic=manhattan):
         closed.add(cur)
         for nb in neighbors4(cur):
             if grid[nb[0]][nb[1]]==1: continue
+            
+            # TAMBAHKAN 1 BARIS INI
+            if nb in dyn_obs_set: continue
+            
             tentative = gscore[cur]+1
             if tentative < gscore.get(nb, 1e12):
                 gscore[nb]=tentative
@@ -205,17 +214,11 @@ def generate_moving_obstacles(grid, count=3):
     rng=random.Random()
     obs=[]
     free_cells = [(r,c) for r in range(GRID_H) for c in range(GRID_W) if grid[r][c]==0]
+    if not free_cells: return [] # Tidak ada ruang kosong
+    
     for _ in range(count):
         start = rng.choice(free_cells)
-        path=[start]
-        cur = start
-        for _ in range(rng.randint(3,8)):
-            nbs=[nb for nb in neighbors4(cur) if grid[nb[0]][nb[1]]==0]
-            if not nbs: break
-            cur = rng.choice(nbs)
-            path.append(cur)
-        if len(path)<2: continue
-        obs.append({"path":path, "loop":True})
+        obs.append({"path": [start], "loop": False}) 
     return obs
 
 def csp_schedule(paths, moving_obstacles, max_offset=20):
@@ -382,6 +385,45 @@ def api_compute_paths():
     if isinstance(csp, dict) and isinstance(csp.get("start_times"), dict):
         csp["start_times"] = {str(k): v for k, v in csp["start_times"].items()}
     return jsonify({"ok":True, "paths":paths, "scheduled_paths":scheduled_paths, "stats":perrobot_stats, "csp":csp})
+
+#replan route api
+@app.route('/api/replan', methods=['POST'])
+def api_replan():
+    body = request.get_json()
+    grid = body["grid"]
+    start = parse_cell(body["start"])
+    tasks_remaining = [parse_cell(t) for t in body.get("tasks_remaining", [])]
+    
+    dynamic_obs_raw = body.get("dynamic_obstacles", [])
+    dynamic_obstacles = set()
+    for obs in dynamic_obs_raw:
+        try:
+            dynamic_obstacles.add(parse_cell(obs))
+        except ValueError:
+            pass
+
+    if not tasks_remaining:
+        return jsonify({"ok": True, "path": [start]})
+
+    cur = start
+    full_new_path = []
+    
+    for i, task_goal in enumerate(tasks_remaining):
+        # Hanya gunakan rintangan dinamis untuk kaki pertama (paling mendesak)
+        current_dyn_obs = dynamic_obstacles if i == 0 else set()
+        
+        p, n, tt = astar(grid, cur, task_goal, heuristic=manhattan, dynamic_obstacles=current_dyn_obs)
+        
+        if not p:
+            return jsonify({"ok": False, "reason": "no_path_replan", "task": task_goal})
+
+        if full_new_path and p[0] == full_new_path[-1]:
+            full_new_path.extend(p[1:])
+        else:
+            full_new_path.extend(p)
+        cur = task_goal
+
+    return jsonify({"ok": True, "path": full_new_path})
 
 if __name__=="__main__":
     print("Starting backend on 5001")
