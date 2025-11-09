@@ -51,6 +51,11 @@ function CanvasGrid({
           ctx.fillRect(c * cell, r * cell, cell - 1, cell - 1);
           ctx.strokeStyle = "#e6f0fb";
           ctx.strokeRect(c * cell, r * cell, cell - 1, cell - 1);
+          ctx.fillStyle = "#d0d8e0";
+          ctx.font = "8px Arial";
+          ctx.textAlign = "left";
+          ctx.textBaseline = "top";
+          ctx.fillText(`(${r},${c})`, c * cell + 2, r * cell + 2);
         }
       }
     }
@@ -128,6 +133,55 @@ function CanvasGrid({
   return <canvas ref={canvasRef} className="grid-canvas" />;
 }
 
+function RobotDetailModal({ robotKey, robotData, onClose }) {
+  const { path, currentStepIdx, log } = robotData;
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+        <h2>Detail Robot @ {robotKey}</h2>
+        <button className="modal-close" onClick={onClose}>
+          &times;
+        </button>
+
+        <div className="modal-stats">
+          <div>
+            Status: <strong>{log?.status || "N/A"}</strong>
+          </div>
+          <div>
+            Posisi: <strong>{log?.posisi || "N/A"}</strong>
+          </div>
+          <div>
+            Target: <strong>{log?.target || "N/A"}</strong>
+          </div>
+          <div>
+            Langkah Berikut: <strong>{log?.langkahBerikutnya || "N/A"}</strong>
+          </div>
+          <div>
+            Iterasi Saat Ini:{" "}
+            <strong>
+              {currentStepIdx} / {path.length - 1}
+            </strong>
+          </div>
+        </div>
+
+        <h3>Daftar Langkah (Path)</h3>
+        <div className="path-list">
+          {path.map((step, idx) => (
+            <div
+              key={idx}
+              className={`path-step ${idx === currentStepIdx ? "current" : ""}`}
+            >
+              {idx === currentStepIdx ? ">> " : ""}
+              Langkah {idx}: ({step[0]}, {step[1]})
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [grid, setGrid] = useState(
     Array.from({ length: 20 }, () => Array(30).fill(0))
@@ -158,16 +212,30 @@ export default function App() {
   const [forkliftPositions, setForkliftPositions] = useState([]);
   const lastForkliftTickRef = useRef(0);
 
+  const [forkliftDirections, setForkliftDirections] = useState([]);
+
+  const [mapWidth, setMapWidth] = useState(30);
+  const [mapHeight, setMapHeight] = useState(20);
+  const [numRobots, setNumRobots] = useState(2);
+
+  const [selectedRobotKey, setSelectedRobotKey] = useState(null);
+
   useEffect(() => {
     generateMap();
   }, []);
 
   async function generateMap() {
     setStatus("generating");
+
+    const calculatedTasks = 3 * numRobots + 2;
+    const calculatedMoving = numRobots + 1;
+
     const res = await axios.post(BACKEND + "/generate_map", {
-      num_tasks: 5,
-      robots: 2,
-      moving: 3,
+      width: mapWidth,
+      height: mapHeight,
+      num_robots: numRobots,
+      num_tasks: calculatedTasks,
+      moving: calculatedMoving,
     });
     setGrid(res.data.grid);
     setTasks(res.data.tasks);
@@ -180,6 +248,17 @@ export default function App() {
       o.path && o.path[0] ? o.path[0] : [0, 0]
     );
     setForkliftPositions(startPos);
+
+    const allDirections = [
+      [-1, 0],
+      [1, 0],
+      [0, -1],
+      [0, 1],
+    ]; // Atas, Bawah, Kiri, Kanan
+    const startDirs = startPos.map(
+      () => allDirections[Math.floor(Math.random() * 4)]
+    );
+    setForkliftDirections(startDirs);
 
     setStatus("ready");
   }
@@ -406,20 +485,29 @@ export default function App() {
         if (currentTick > lastTick) {
           lastForkliftTickRef.current = currentTick;
 
-          currentForkliftPos = forkliftPositions.map((pos) => {
-            if (!pos) return null;
-            const [r, c] = pos;
-            const neighbors = [
+          if (currentTick % 2 === 0) {
+            let newPositions = [];
+            let newDirections = [];
+            const allDirections = [
               [-1, 0],
               [1, 0],
               [0, -1],
               [0, 1],
             ];
-            const validNeighbors = [];
 
-            for (const [dr, dc] of neighbors) {
+            forkliftPositions.forEach((pos, idx) => {
+              if (!pos) {
+                newPositions.push(null);
+                newDirections.push(null);
+                return;
+              }
+
+              const [r, c] = pos;
+              const [dr, dc] = forkliftDirections[idx] || [0, 1];
+
               const nr = r + dr;
               const nc = c + dc;
+
               if (
                 nr >= 0 &&
                 nr < grid.length &&
@@ -427,19 +515,26 @@ export default function App() {
                 nc < grid[0].length &&
                 grid[nr][nc] === 0
               ) {
-                validNeighbors.push([nr, nc]);
+                newPositions.push([nr, nc]);
+                newDirections.push([dr, dc]);
+              } else {
+                newPositions.push(pos);
+
+                const otherDirections = allDirections.filter(
+                  (d) => d[0] !== dr || d[1] !== dc
+                );
+                newDirections.push(
+                  otherDirections[
+                    Math.floor(Math.random() * otherDirections.length)
+                  ]
+                );
               }
-            }
+            });
 
-            if (validNeighbors.length > 0) {
-              return validNeighbors[
-                Math.floor(Math.random() * validNeighbors.length)
-              ];
-            }
-            return pos;
-          });
-
-          setForkliftPositions(currentForkliftPos);
+            setForkliftPositions(newPositions);
+            setForkliftDirections(newDirections);
+            currentForkliftPos = newPositions;
+          }
         }
 
         const forkliftCells = new Set();
@@ -495,12 +590,22 @@ export default function App() {
           );
           const nextCell = pts[nextCellIdx];
 
+          // if (
+          //   forkliftCells.has(`${nextCell[0]},${nextCell[1]}`) &&
+          //   !isReplanning[robotIdx]
+          // ) {
+          //   tRobotNext = Math.floor(tRobot); // Berhenti
+          //   handleReplanning(robotIdx, robotKey);
+          // }
+
+          let isWaiting = false;
+
           if (
             forkliftCells.has(`${nextCell[0]},${nextCell[1]}`) &&
             !isReplanning[robotIdx]
           ) {
-            tRobotNext = Math.floor(tRobot); // Berhenti
-            handleReplanning(robotIdx, robotKey);
+            tRobotNext = Math.floor(tRobot);
+            isWaiting = true;
           }
 
           newSimTimes[robotIdx] = tRobotNext;
@@ -528,11 +633,22 @@ export default function App() {
           }
 
           // Kumpulkan data log
+          // let statusLog = "Menuju Target";
+          // if (isReplanning[robotIdx]) statusLog = "REPLANNING...";
+
+          // const targetTask =
+          //   taskList[newIndices[robotIdx]] || taskList[currentTaskIdx];
+
           let statusLog = "Menuju Target";
-          if (isReplanning[robotIdx]) statusLog = "REPLANNING...";
+          if (isReplanning[robotIdx]) {
+            statusLog = "REPLANNING...";
+          } else if (isWaiting) {
+            statusLog = "Menunggu Forklift";
+          }
 
           const targetTask =
             taskList[newIndices[robotIdx]] || taskList[currentTaskIdx];
+
           const nextStep =
             pts[Math.min(pts.length - 1, Math.floor(tRobot) + 1)] || currentPos;
 
@@ -581,6 +697,7 @@ export default function App() {
       stopAnimation,
       forkliftPositions,
       grid,
+      forkliftDirections,
     ]
   );
 
@@ -609,6 +726,30 @@ export default function App() {
           <button className="btn" onClick={generateMap}>
             Generate Map
           </button>
+          <div className="input-group">
+            <label className="label">W:</label>
+            <input
+              type="number"
+              value={mapWidth}
+              onChange={(e) => setMapWidth(Number(e.target.value))}
+            />
+          </div>
+          <div className="input-group">
+            <label className="label">H:</label>
+            <input
+              type="number"
+              value={mapHeight}
+              onChange={(e) => setMapHeight(Number(e.target.value))}
+            />
+          </div>
+          <div className="input-group">
+            <label className="label">Robots:</label>
+            <input
+              type="number"
+              value={numRobots}
+              onChange={(e) => setNumRobots(Number(e.target.value))}
+            />
+          </div>
           <button className="small" onClick={planTasks}>
             Plan Tasks
           </button>
@@ -696,6 +837,7 @@ export default function App() {
                 key={robotKey}
                 className="stat"
                 style={{ borderLeft: `5px solid ${color}`, padding: "10px" }}
+                onClick={() => setSelectedRobotKey(robotKey)}
               >
                 <div
                   className="value"
@@ -783,6 +925,21 @@ export default function App() {
           </div>
         </div>
       </div>
+      {selectedRobotKey && (
+        <RobotDetailModal
+          robotKey={selectedRobotKey}
+          onClose={() => setSelectedRobotKey(null)}
+          robotData={{
+            path: paths[selectedRobotKey] || [],
+            log: robotLogs[selectedRobotKey] || {},
+            currentStepIdx: Math.floor(
+              robotSimTimes[
+                robots.findIndex((r) => JSON.stringify(r) === selectedRobotKey)
+              ] || 0
+            ),
+          }}
+        />
+      )}
     </div>
   );
 }
