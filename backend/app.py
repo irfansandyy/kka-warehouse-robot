@@ -6,14 +6,14 @@ from itertools import permutations
 app = Flask(__name__)
 CORS(app)
 
-GRID_W = 30
-GRID_H = 20
+# GRID_W = 30
+# GRID_H = 20
 
-def neighbors4(node):
+def neighbors4(node, height, width):
     r,c = node
     for dr,dc in ((1,0),(-1,0),(0,1),(0,-1)):
         nr,nc = r+dr,c+dc
-        if 0<=nr<GRID_H and 0<=nc<GRID_W:
+        if 0<=nr<height and 0<=nc<width:
             yield (nr,nc)
 
 def manhattan(a,b):
@@ -37,25 +37,25 @@ def parse_cell(cell):
             return (int(parts[0]), int(parts[1]))
     raise ValueError(f"Invalid cell format: {cell}")
 
-def generate_warehouse(seed=None, obstacle_density=0.12):
+def generate_warehouse(seed=None, obstacle_density=0.12, width=30, height=20):
     rng = random.Random(seed)
-    grid = [[0]*GRID_W for _ in range(GRID_H)]
-    for c in range(1, GRID_W-1):
+    grid = [[0]*width for _ in range(height)]
+    for c in range(1, width-1):
         if rng.random() < 0.12:
-            for r in range(GRID_H):
+            for r in range(height):
                 if rng.random() < 0.9:
                     grid[r][c] = 1
             for _ in range(rng.randint(1,3)):
-                gap = rng.randrange(0,GRID_H)
+                gap = rng.randrange(0,height)
                 grid[gap][c] = 0
-    for r in range(GRID_H):
-        for c in range(GRID_W):
+    for r in range(height):
+        for c in range(width):
             if rng.random() < obstacle_density*0.6:
                 grid[r][c] = 1
-    for c in range(GRID_W):
-        grid[0][c]=0; grid[GRID_H-1][c]=0
-    for r in range(GRID_H):
-        grid[r][0]=0; grid[r][GRID_W-1]=0
+    for c in range(width):
+        grid[0][c]=0; grid[height-1][c]=0
+    for r in range(height):
+        grid[r][0]=0; grid[r][width-1]=0
     return grid
 
 #fixed astar
@@ -67,6 +67,9 @@ def astar(grid, start, goal, heuristic=manhattan, dynamic_obstacles=None):
     gscore={start:0}
     closed=set()
     nodes=0
+
+    height = len(grid)
+    width = len(grid[0]) if height > 0 else 0
     
     dyn_obs_set = set()
     if dynamic_obstacles: dyn_obs_set = set(dynamic_obstacles)
@@ -82,7 +85,7 @@ def astar(grid, start, goal, heuristic=manhattan, dynamic_obstacles=None):
             path.reverse()
             return path, nodes, time.perf_counter()-t0
         closed.add(cur)
-        for nb in neighbors4(cur):
+        for nb in neighbors4(cur, height, width):
             if grid[nb[0]][nb[1]]==1: continue
             
             # TAMBAHKAN 1 BARIS INI
@@ -213,8 +216,11 @@ def local_search_assign(grid, robots, tasks, alg, iters=2000):
 def generate_moving_obstacles(grid, count=3):
     rng=random.Random()
     obs=[]
-    free_cells = [(r,c) for r in range(GRID_H) for c in range(GRID_W) if grid[r][c]==0]
-    if not free_cells: return [] # Tidak ada ruang kosong
+
+    height = len(grid)
+    width = len(grid[0]) if height > 0 else 0
+    free_cells = [(r,c) for r in range(height) for c in range(width) if grid[r][c]==0]
+    if not free_cells: return []
     
     for _ in range(count):
         start = rng.choice(free_cells)
@@ -296,16 +302,27 @@ def csp_schedule(paths, moving_obstacles, max_offset=20):
 def api_generate_map():
     body = request.get_json() or {}
     seed = body.get("seed", None)
-    grid = generate_warehouse(seed)
+
+    width = body.get("width", 30)
+    height = body.get("height", 20)
+    num_robots = body.get("num_robots", 2)
+    num_tasks = body.get("num_tasks", 5)
+    num_moving = body.get("moving", 3)
+
+    grid = generate_warehouse(seed, width=width, height=height)
     tasks = []
-    free = [(r,c) for r in range(GRID_H) for c in range(GRID_W) if grid[r][c]==0]
-    for _ in range(body.get("num_tasks",5)):
+    free = [(r,c) for r in range(height) for c in range(width) if grid[r][c]==0]
+    if not free: # Tambahkan penjaga jika grid penuh
+        free = [(0,0)]
+
+    for _ in range(num_tasks):
         tasks.append(random.choice(free))
-    robots = body.get("robots", 2)
+    
     robot_positions = []
-    for i in range(robots):
+    for i in range(num_robots):
         robot_positions.append(random.choice(free))
-    moving = generate_moving_obstacles(grid, count=body.get("moving", 3))
+        
+    moving = generate_moving_obstacles(grid, count=num_moving)
     return jsonify({"grid":grid, "tasks":tasks, "robots":robot_positions, "moving":moving})
 
 @app.route('/api/plan_tasks', methods=['POST'])
