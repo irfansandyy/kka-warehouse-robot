@@ -205,9 +205,9 @@ export default function App() {
   const [robotLogs, setRobotLogs] = useState({});
 
   const rafRef = useRef(null);
-  const timeRef = useRef([]); // Waktu individual robot
-  const globalTimeRef = useRef(0); // Waktu global untuk forklift
-  const [globalSimTime, setGlobalSimTime] = useState(0); // Untuk rendering forklift
+  const timeRef = useRef([]);
+  const globalTimeRef = useRef(0);
+  const [globalSimTime, setGlobalSimTime] = useState(0);
 
   const [forkliftPositions, setForkliftPositions] = useState([]);
   const lastForkliftTickRef = useRef(0);
@@ -254,7 +254,7 @@ export default function App() {
       [1, 0],
       [0, -1],
       [0, 1],
-    ]; // Atas, Bawah, Kiri, Kanan
+    ];
     const startDirs = startPos.map(
       () => allDirections[Math.floor(Math.random() * 4)]
     );
@@ -545,7 +545,7 @@ export default function App() {
         const newSimTimes = [...timeRef.current];
         const newPositions = [];
         const newIndices = [...robotTaskIndices];
-        const newLogs = {}; // Untuk logging
+        const newLogs = {};
 
         for (let i = 0; i < entries.length; i++) {
           const robotIdx = robotIndices[i];
@@ -574,7 +574,6 @@ export default function App() {
             const finalPos = pts[pts.length - 1];
             newPositions[robotIdx] = finalPos;
 
-            // Log data saat selesai
             newLogs[robotKey] = {
               posisi: `(${finalPos[0].toFixed(1)}, ${finalPos[1].toFixed(1)})`,
               target: "N/A",
@@ -632,7 +631,6 @@ export default function App() {
             }
           }
 
-          // Kumpulkan data log
           // let statusLog = "Menuju Target";
           // if (isReplanning[robotIdx]) statusLog = "REPLANNING...";
 
@@ -668,7 +666,7 @@ export default function App() {
         setRobotSimTimes(newSimTimes);
         setRobotPositions(newPositions);
         setRobotTaskIndices(newIndices);
-        setRobotLogs(newLogs); // Perbarui state log
+        setRobotLogs(newLogs);
 
         const allDone = newSimTimes.every((t, i) => {
           const path = paths[entries[i].key] || [];
@@ -717,7 +715,7 @@ export default function App() {
     } else {
       stopAnimation();
     }
-  }, [paths]); // Hanya bergantung pada paths
+  }, [paths, robots]);
 
   return (
     <div className="app">
