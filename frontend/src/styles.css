@@ -24,6 +24,7 @@ body {
   gap: 10px;
   align-items: center;
   margin-bottom: 8px;
+  flex-wrap: wrap;
 }
 .btn {
   background: #0b69ff;
@@ -135,6 +136,132 @@ body {
   padding: 4px;
   border: 1px solid #ccc;
   border-radius: 4px;
+}
+
+.control-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.control-group select {
+  padding: 4px 6px;
+  border: 1px solid #a6cdfc;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #0b2140;
+}
+
+.metrics-block {
+  margin-top: 8px;
+}
+
+.metrics-heading {
+  font-weight: 600;
+  font-size: 13px;
+  color: #0b2140;
+  margin-bottom: 4px;
+}
+
+.metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 6px;
+}
+
+.metric-row {
+  display: flex;
+  justify-content: space-between;
+  background: #ffffff;
+  border: 1px solid #e6eef8;
+  border-radius: 6px;
+  padding: 4px 6px;
+  font-size: 12px;
+}
+
+.metric-label {
+  color: #44516b;
+  font-weight: 600;
+}
+
+.metric-value {
+  color: #0b2140;
+}
+
+.pending-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px;
+  margin: 6px 0 10px;
+}
+
+.pending-section ul {
+  list-style: none;
+  padding: 0;
+  margin: 4px 0 0;
+}
+
+.pending-add {
+  color: #0b69ff;
+  font-size: 12px;
+}
+
+.pending-remove {
+  color: #f5533e;
+  font-size: 12px;
+}
+
+.modal-content.map-settings {
+  max-width: 640px;
+  gap: 12px;
+}
+
+.modal-hint {
+  margin: 0;
+  color: #65739a;
+  font-size: 13px;
+}
+
+.settings-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
+}
+
+.modal-content.map-settings .settings-grid .input-group {
+  align-items: flex-start;
+  flex-direction: column;
+}
+
+.modal-content.map-settings .settings-grid .input-group input {
+  width: 100%;
+  min-width: 120px;
+}
+
+.settings-section .input-group {
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  gap: 6px;
+}
+
+.settings-section {
+  border: 1px solid #e9f2ff;
+  border-radius: 8px;
+  padding: 8px;
+  background: #f7fbff;
+}
+
+.settings-section h3 {
+  margin: 0 0 6px;
+  font-size: 14px;
+  color: #0b2140;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 12px;
 }
 
 .modal-backdrop {
