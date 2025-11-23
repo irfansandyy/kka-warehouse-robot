@@ -1,954 +1,37 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import ast
-import math
 import random
-import heapq
 import time
-from collections import deque
-from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
+
+from kka_backend.config import (
+    DEFAULT_MOVING_RANGE,
+    DEFAULT_ROBOT_RANGE,
+    DEFAULT_TASK_RANGE,
+    DEFAULT_WALL_RANGE,
+    MAX_HEIGHT,
+    MAX_ROBOTS,
+    MAX_WIDTH,
+)
+from kka_backend.services.assignments import (
+    analyze_reachability,
+    compile_task_assignments,
+    ga_assign,
+    greedy_assign,
+    local_search_assign,
+)
+from kka_backend.services.manual_edits import apply_manual_edits
+from kka_backend.services.map_generation import generate_moving_obstacles, generate_warehouse
+from kka_backend.services.meta import snapshot_meta
+from kka_backend.services.paths import PathLibrary, astar, build_timeline
+from kka_backend.services.scheduling import build_dynamic_obstacle_timeline, csp_schedule
+from kka_backend.utils.cells import parse_cell, normalize_positions
+from kka_backend.utils.grid import get_free_cells, normalize_grid
+from kka_backend.utils.numeric import clamp_int, estimate_walkable_cells
+from kka_backend.utils.ranges import choose_from_range, parse_range
+from kka_backend.utils.selection import select_unique_cells
 
 app = Flask(__name__)
 CORS(app)
-
-MAX_ROBOTS = 5
-MAX_WIDTH = 200
-MAX_HEIGHT = 200
-MAX_GENERATE_ATTEMPTS = 12
-DEFAULT_WALL_RANGE = (0.02, 0.06)
-DEFAULT_TASK_RANGE = (12, 24)
-DEFAULT_MOVING_RANGE = (1, 6)
-DEFAULT_ROBOT_RANGE = (2, 4)
-FORKLIFT_PATH_MIN = 100
-FORKLIFT_PATH_MAX = 100
-ROBOT_COLORS = ["#0b69ff", "#ff5f55", "#2dbf88", "#e2a72e", "#7b5fff"]
-
-
-def clamp(value: float, low: float, high: float) -> float:
-    return max(low, min(high, value))
-
-
-def clamp_int(value: int, low: int, high: int) -> int:
-    return int(clamp(value, low, high))
-
-
-def parse_range(
-    payload: Optional[dict],
-    default: Tuple[float, float],
-    integer: bool = False,
-    low: Optional[float] = None,
-    high: Optional[float] = None,
-) -> Tuple[float, float]:
-    if not isinstance(payload, dict):
-        lo, hi = default
-    else:
-        lo = payload.get("min", default[0])
-        hi = payload.get("max", default[1])
-    if integer:
-        lo = int(lo)
-        hi = int(hi)
-    lo = float(lo)
-    hi = float(hi)
-    if lo > hi:
-        lo, hi = hi, lo
-    if low is not None:
-        lo = max(lo, low)
-        hi = max(hi, low)
-    if high is not None:
-        lo = min(lo, high)
-        hi = min(hi, high)
-    return lo, hi
-
-
-def choose_from_range(rng: random.Random, bounds: Tuple[float, float], integer: bool = True) -> int:
-    if integer:
-        lo = int(math.floor(bounds[0]))
-        hi = int(math.floor(bounds[1]))
-        if lo > hi:
-            lo, hi = hi, lo
-        return rng.randint(lo, hi)
-    return rng.uniform(bounds[0], bounds[1])
-
-
-def neighbors4(node: Tuple[int, int], height: int, width: int) -> Iterable[Tuple[int, int]]:
-    r, c = node
-    for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-        nr, nc = r + dr, c + dc
-        if 0 <= nr < height and 0 <= nc < width:
-            yield (nr, nc)
-
-
-def manhattan(a: Tuple[int, int], b: Tuple[int, int]) -> int:
-    return abs(a[0] - b[0]) + abs(a[1] - b[1])
-
-
-def euclidean(a: Tuple[int, int], b: Tuple[int, int]) -> float:
-    return math.hypot(a[0] - b[0], a[1] - b[1])
-
-
-def estimate_walkable_cells(width: int, height: int, density_range: Tuple[float, float]) -> int:
-    avg_density = clamp((density_range[0] + density_range[1]) / 2.0, 0.02, 0.45)
-    return max(1, int(width * height * (1.0 - avg_density)))
-
-
-def parse_cell(cell) -> Tuple[int, int]:
-    if isinstance(cell, (list, tuple)) and len(cell) == 2:
-        return int(cell[0]), int(cell[1])
-    if isinstance(cell, str):
-        try:
-            parsed = ast.literal_eval(cell)
-            if isinstance(parsed, (list, tuple)) and len(parsed) == 2:
-                return int(parsed[0]), int(parsed[1])
-        except Exception:
-            stripped = cell.strip().strip("()[]")
-            parts = [p.strip() for p in stripped.split(",")]
-            if len(parts) == 2:
-                return int(parts[0]), int(parts[1])
-    raise ValueError(f"Invalid cell format: {cell}")
-
-
-def get_free_cells(grid: List[List[int]]) -> List[Tuple[int, int]]:
-    height = len(grid)
-    width = len(grid[0]) if height else 0
-    return [(r, c) for r in range(height) for c in range(width) if grid[r][c] == 0]
-
-
-def bfs_component(grid: List[List[int]], start: Tuple[int, int]) -> Set[Tuple[int, int]]:
-    height = len(grid)
-    width = len(grid[0]) if height else 0
-    visited: Set[Tuple[int, int]] = set()
-    queue = deque([start])
-    visited.add(start)
-    while queue:
-        cell = queue.popleft()
-        for nb in neighbors4(cell, height, width):
-            if grid[nb[0]][nb[1]] != 0:
-                continue
-            if nb in visited:
-                continue
-            visited.add(nb)
-            queue.append(nb)
-    return visited
-
-
-def shortest_path(
-    grid: List[List[int]],
-    start: Tuple[int, int],
-    goal: Tuple[int, int],
-    blocked: Set[Tuple[int, int]],
-    allow: Optional[Set[Tuple[int, int]]] = None,
-) -> Optional[List[Tuple[int, int]]]:
-    if start == goal:
-        return [start]
-    height = len(grid)
-    width = len(grid[0]) if height else 0
-    allow = allow or set()
-    queue = deque([(start, [start])])
-    visited = {start}
-    while queue:
-        cell, path = queue.popleft()
-        for nb in neighbors4(cell, height, width):
-            if grid[nb[0]][nb[1]] == 1:
-                continue
-            if nb in blocked and nb not in allow:
-                continue
-            if nb in visited:
-                continue
-            visited.add(nb)
-            new_path = path + [nb]
-            if nb == goal:
-                return new_path
-            queue.append((nb, new_path))
-    return None
-
-
-def ensure_perimeter_clear(grid: List[List[int]]) -> None:
-    height = len(grid)
-    width = len(grid[0]) if height else 0
-    for r in range(height):
-        grid[r][0] = 0
-        grid[r][width - 1] = 0
-    for c in range(width):
-        grid[0][c] = 0
-        grid[height - 1][c] = 0
-
-
-def generate_warehouse(
-    seed: Optional[int],
-    width: int,
-    height: int,
-    density_bounds: Tuple[float, float],
-) -> Tuple[List[List[int]], float]:
-    rng = random.Random(seed)
-    best_grid: Optional[List[List[int]]] = None
-    best_density: float = 0.0
-    target_attempts = MAX_GENERATE_ATTEMPTS
-    for attempt in range(target_attempts):
-        density = clamp(choose_from_range(rng, density_bounds, integer=False), 0.02, 0.45)
-        grid = [[0 for _ in range(width)] for _ in range(height)]
-        ensure_perimeter_clear(grid)
-
-        # Place shelving corridors with guaranteed walkways
-        interior_columns = list(range(2, width - 2))
-        rng.shuffle(interior_columns)
-        shelf_columns = interior_columns[: max(1, int(len(interior_columns) * 0.4))]
-        for c in shelf_columns:
-            gaps = rng.sample(range(1, height - 1), k=max(1, height // 6))
-            for r in range(1, height - 1):
-                if r in gaps:
-                    continue
-                if rng.random() < 0.9:
-                    grid[r][c] = 1
-
-        # Scatter additional obstacles based on density target
-        target_walls = int(width * height * density)
-        attempts = 0
-        while attempts < target_walls:
-            r = rng.randrange(1, height - 1)
-            c = rng.randrange(1, width - 1)
-            if grid[r][c] == 1:
-                continue
-            grid[r][c] = 1
-            attempts += 1
-
-        ensure_perimeter_clear(grid)
-        free_cells = get_free_cells(grid)
-        if not free_cells:
-            continue
-        reachable = bfs_component(grid, free_cells[0])
-        ratio = len(reachable) / max(1, len(free_cells))
-        if ratio >= 0.65:
-            actual_density = 1.0 - len(free_cells) / (width * height)
-            return grid, actual_density
-        if best_grid is None or ratio > 0.5:
-            best_grid = grid
-            best_density = 1.0 - len(free_cells) / (width * height)
-    if best_grid is None:
-        best_grid = [[0 for _ in range(width)] for _ in range(height)]
-        ensure_perimeter_clear(best_grid)
-    return best_grid, best_density
-
-
-def select_unique_cells(
-    rng: random.Random,
-    pool: List[Tuple[int, int]],
-    count: int,
-    forbidden: Optional[Set[Tuple[int, int]]] = None,
-) -> List[Tuple[int, int]]:
-    if count <= 0:
-        return []
-    forbidden = forbidden or set()
-    eligible = [cell for cell in pool if cell not in forbidden]
-    if not eligible:
-        return []
-    if count >= len(eligible):
-        selected = eligible
-    else:
-        selected = rng.sample(eligible, count)
-    for cell in selected:
-        if cell in pool:
-            pool.remove(cell)
-        forbidden.add(cell)
-    return selected
-
-
-def build_forklift_loop(
-    grid: List[List[int]],
-    start: Tuple[int, int],
-    rng: random.Random,
-    min_len: int,
-    max_len: int,
-    blocked: Set[Tuple[int, int]],
-) -> Optional[List[Tuple[int, int]]]:
-    height = len(grid)
-    width = len(grid[0]) if height else 0
-    target_len = rng.randint(min_len, max_len)
-    path = [start]
-    blocked_local = set(blocked)
-    blocked_local.add(start)
-    current = start
-    for _ in range(target_len - 1):
-        choices = [
-            nb
-            for nb in neighbors4(current, height, width)
-            if grid[nb[0]][nb[1]] == 0 and nb not in blocked_local
-        ]
-        rng.shuffle(choices)
-        if not choices:
-            break
-        nxt = choices.pop()
-        path.append(nxt)
-        blocked_local.add(nxt)
-        current = nxt
-    if len(path) < 2:
-        return None
-    blocked_for_return = set(blocked)
-    blocked_for_return.update(path[1:-1])
-    closing = shortest_path(
-        grid,
-        current,
-        start,
-        blocked_for_return,
-        allow=set(path),
-    )
-    if not closing:
-        return None
-    full = path[:-1] + closing
-    if len(set(full)) < 2:
-        return None
-    return full
-
-
-def build_forklift_random_walk(
-    grid: List[List[int]],
-    start: Tuple[int, int],
-    rng: random.Random,
-    min_len: int,
-    max_len: int,
-    blocked: Optional[Set[Tuple[int, int]]] = None,
-) -> List[Tuple[int, int]]:
-    height = len(grid)
-    width = len(grid[0]) if height else 0
-    target_len = max(2, rng.randint(min_len, max_len))
-    path = [start]
-    current = start
-    prev: Optional[Tuple[int, int]] = None
-    restricted = set(blocked or set())
-
-    for _ in range(target_len - 1):
-        candidates = []
-        for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-            nr = current[0] + dr
-            nc = current[1] + dc
-            nxt = (nr, nc)
-            if not (0 <= nr < height and 0 <= nc < width):
-                continue
-            if grid[nr][nc] == 1 or nxt in restricted:
-                continue
-            candidates.append(nxt)
-        if prev is not None and len(candidates) > 1:
-            filtered = [cell for cell in candidates if cell != prev]
-            if filtered:
-                candidates = filtered
-        if not candidates:
-            break
-        nxt = rng.choice(candidates)
-        path.append(nxt)
-        prev = current
-        current = nxt
-    return path
-
-
-def ensure_forklift_loop(
-    grid: List[List[int]],
-    path: List[Tuple[int, int]],
-) -> Tuple[List[Tuple[int, int]], bool]:
-    if len(path) < 2:
-        return path, False
-    start = path[0]
-    end = path[-1]
-    closing = shortest_path(grid, end, start, blocked=set())
-    if closing and len(closing) > 1:
-        looped = path + closing[1:]
-        return looped, True
-    return path, False
-
-
-def generate_moving_obstacles(
-    grid: List[List[int]],
-    count: int,
-    rng: random.Random,
-    robots: Sequence[Tuple[int, int]],
-    tasks: Sequence[Tuple[int, int]],
-) -> List[dict]:
-    height = len(grid)
-    width = len(grid[0]) if height else 0
-    base_blocked: Set[Tuple[int, int]] = set(robots)
-    base_blocked.update(tasks)
-    for cell in list(base_blocked):
-        for nb in neighbors4(cell, height, width):
-            base_blocked.add(nb)
-    free_cells = [cell for cell in get_free_cells(grid) if cell not in base_blocked]
-    rng.shuffle(free_cells)
-    obstacles = []
-    occupied = set(base_blocked)
-    for idx in range(count):
-        while free_cells and free_cells[-1] in occupied:
-            free_cells.pop()
-        if not free_cells:
-            break
-        start = free_cells.pop()
-        blocked_for_walk = set(occupied)
-        blocked_for_walk.discard(start)
-        walk = build_forklift_random_walk(
-            grid,
-            start,
-            rng,
-            FORKLIFT_PATH_MIN,
-            FORKLIFT_PATH_MAX,
-            blocked=blocked_for_walk,
-        )
-        if not walk or len(walk) < 2:
-            continue
-        walk, is_loop = ensure_forklift_loop(grid, walk)
-        occupied.update(walk)
-        obstacles.append(
-            {
-                "id": idx,
-                "path": walk,
-                "loop": is_loop,
-                "period": len(walk),
-            }
-        )
-    return obstacles
-
-
-def obstacle_timeline_index(length: int, step: int, loop: bool) -> int:
-    if length <= 0:
-        return 0
-    if loop:
-        return step % length
-    return min(step, length - 1)
-
-
-def analyze_reachability(
-    robots: Sequence[Tuple[int, int]],
-    tasks: Sequence[Tuple[int, int]],
-    planner: "PathLibrary",
-) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int]], List[Tuple[int, int]], List[Tuple[int, int]]]:
-    if not robots:
-        return [], [], list(tasks), []
-    if not tasks:
-        return list(robots), [], [], []
-
-    reachable_tasks: Set[Tuple[int, int]] = set()
-    active: List[Tuple[int, int]] = []
-    inactive: List[Tuple[int, int]] = []
-
-    for robot in robots:
-        robot_has_path = False
-        for task in tasks:
-            info = planner.ensure(robot, task)
-            if info.get("path"):
-                robot_has_path = True
-                reachable_tasks.add(task)
-        if robot_has_path:
-            active.append(robot)
-        else:
-            inactive.append(robot)
-
-    assignable_tasks = [task for task in tasks if task in reachable_tasks]
-    unreachable_tasks = [task for task in tasks if task not in reachable_tasks]
-
-    return active, inactive, assignable_tasks, unreachable_tasks
-
-
-class PathLibrary:
-    def __init__(self, grid: List[List[int]], alg: str):
-        self.grid = grid
-        self.alg = alg
-        self.cache: Dict[Tuple[Tuple[int, int], Tuple[int, int]], dict] = {}
-
-    def _solve(self, start: Tuple[int, int], goal: Tuple[int, int]) -> dict:
-        planner = astar if self.alg == "astar" else dijkstra
-        path, nodes, elapsed = planner(self.grid, start, goal)
-        if not path:
-            return {
-                "path": [],
-                "cost": math.inf,
-                "nodes": nodes,
-                "time": elapsed,
-            }
-        cost = max(len(path) - 1, 0)
-        return {
-            "path": path,
-            "cost": cost,
-            "nodes": nodes,
-            "time": elapsed,
-        }
-
-    def ensure(self, start: Tuple[int, int], goal: Tuple[int, int]) -> dict:
-        key = (start, goal)
-        if key not in self.cache:
-            self.cache[key] = self._solve(start, goal)
-        return self.cache[key]
-
-    def cost(self, start: Tuple[int, int], goal: Tuple[int, int]) -> float:
-        return self.ensure(start, goal)["cost"]
-
-    def path(self, start: Tuple[int, int], goal: Tuple[int, int]) -> List[Tuple[int, int]]:
-        return self.ensure(start, goal)["path"]
-
-
-def astar(
-    grid: List[List[int]],
-    start: Tuple[int, int],
-    goal: Tuple[int, int],
-    heuristic=manhattan,
-    dynamic_obstacles: Optional[Iterable] = None,
-):
-    t0 = time.perf_counter()
-    openh: List[Tuple[float, int, Tuple[int, int]]] = []
-    heapq.heappush(openh, (heuristic(start, goal), 0, start))
-    came: Dict[Tuple[int, int], Tuple[int, int]] = {}
-    gscore = {start: 0}
-    closed: Set[Tuple[int, int]] = set()
-    nodes = 0
-
-    height = len(grid)
-    width = len(grid[0]) if height else 0
-
-    dyn_lookup: Dict[int, Set[Tuple[int, int]]] = {}
-    static_dyn: Set[Tuple[int, int]] = set()
-    if isinstance(dynamic_obstacles, dict):
-        dyn_lookup = {
-            int(k): {tuple(cell) for cell in v}
-            for k, v in dynamic_obstacles.items()
-        }
-    elif dynamic_obstacles:
-        static_dyn = {tuple(cell) for cell in dynamic_obstacles}
-
-    while openh:
-        f, g, cur = heapq.heappop(openh)
-        if cur in closed:
-            continue
-        nodes += 1
-        if cur == goal:
-            path = [cur]
-            while cur in came:
-                cur = came[cur]
-                path.append(cur)
-            path.reverse()
-            return path, nodes, time.perf_counter() - t0
-        closed.add(cur)
-        for nb in neighbors4(cur, height, width):
-            if grid[nb[0]][nb[1]] == 1:
-                continue
-            if static_dyn and nb in static_dyn:
-                continue
-            next_step = g + 1
-            if dyn_lookup:
-                blocked = dyn_lookup.get(next_step, set())
-                if nb in blocked:
-                    continue
-            tentative = g + 1
-            if tentative < gscore.get(nb, math.inf):
-                gscore[nb] = tentative
-                came[nb] = cur
-                heapq.heappush(
-                    openh,
-                    (tentative + heuristic(nb, goal), tentative, nb),
-                )
-    return [], nodes, time.perf_counter() - t0
-
-
-def dijkstra(grid, start, goal):
-    return astar(grid, start, goal, heuristic=lambda a, b: 0)
-
-
-def greedy_assign(
-    grid: List[List[int]],
-    robots: Sequence[Tuple[int, int]],
-    tasks: Sequence[Tuple[int, int]],
-    alg: str,
-    planner: PathLibrary,
-) -> Dict[Tuple[int, int], List[Tuple[int, int]]]:
-    remaining = list(tasks)
-    assigned = {r: [] for r in robots}
-    robot_pos = {r: r for r in robots}
-    while remaining:
-        best = None
-        best_dist = math.inf
-        best_cost = math.inf
-        for r in robots:
-            cur = robot_pos[r]
-            for t in remaining:
-                cost = planner.cost(cur, t)
-                if cost == math.inf:
-                    continue
-                dist = euclidean(cur, t)
-                if dist < best_dist - 1e-6 or (
-                    math.isclose(dist, best_dist, rel_tol=1e-6, abs_tol=1e-6)
-                    and cost < best_cost
-                ):
-                    best_dist = dist
-                    best_cost = cost
-                    best = (r, t)
-        if best is None or best_cost == math.inf:
-            break
-        r, t = best
-        assigned[r].append(t)
-        robot_pos[r] = t
-        remaining.remove(t)
-    return assigned
-
-
-def ga_assign(
-    grid: List[List[int]],
-    robots: Sequence[Tuple[int, int]],
-    tasks: Sequence[Tuple[int, int]],
-    alg: str,
-    planner: PathLibrary,
-    pop: int = 40,
-    gens: int = 80,
-    pmut: float = 0.3,
-) -> Dict[Tuple[int, int], List[Tuple[int, int]]]:
-    if not tasks:
-        return {r: [] for r in robots}
-    rng = random.Random()
-    num_robots = len(robots)
-    greedy_seed = greedy_assign(grid, robots, tasks, alg, planner)
-    greedy_flat: List[Tuple[int, int]] = []
-    for r in robots:
-        greedy_flat.extend(greedy_seed.get(r, []))
-    if not greedy_flat:
-        greedy_flat = list(tasks)
-
-    def split_chrom(chrom: Sequence[Tuple[int, int]]) -> List[List[Tuple[int, int]]]:
-        n = len(chrom)
-        sizes = [n // num_robots] * num_robots
-        for i in range(n % num_robots):
-            sizes[i] += 1
-        out = []
-        idx = 0
-        for s in sizes:
-            out.append(list(chrom[idx : idx + s]))
-            idx += s
-        return out
-
-    fitness_cache: Dict[Tuple[Tuple[int, int], ...], float] = {}
-
-    def fitness(chrom: Sequence[Tuple[int, int]]) -> float:
-        key = tuple(chrom)
-        if key in fitness_cache:
-            return fitness_cache[key]
-        parts = split_chrom(chrom)
-        total = 0.0
-        for robot_idx, r in enumerate(robots):
-            cur = r
-            for t in parts[robot_idx]:
-                total += planner.cost(cur, t)
-                cur = t
-        fitness_cache[key] = total
-        return total
-
-    def random_chrom() -> List[Tuple[int, int]]:
-        perm = list(tasks)
-        rng.shuffle(perm)
-        return perm
-
-    def ordered_crossover(a: Sequence[Tuple[int, int]], b: Sequence[Tuple[int, int]]) -> List[Tuple[int, int]]:
-        if len(a) < 2:
-            return list(a)
-        i, j = sorted(rng.sample(range(len(a)), 2))
-        child: List[Optional[Tuple[int, int]]] = [None] * len(a)
-        child[i : j + 1] = a[i : j + 1]
-        fill_idx = (j + 1) % len(a)
-        for candidate in b:
-            if candidate in child:
-                continue
-            child[fill_idx] = candidate
-            fill_idx = (fill_idx + 1) % len(a)
-        return [step for step in child if step is not None]
-
-    def mutate(chrom: List[Tuple[int, int]]):
-        if len(chrom) < 2:
-            return
-        i, j = sorted(rng.sample(range(len(chrom)), 2))
-        if rng.random() < 0.5:
-            chrom[i], chrom[j] = chrom[j], chrom[i]
-        else:
-            segment = chrom[i:j]
-            rng.shuffle(segment)
-            chrom[i:j] = segment
-
-    def tournament(population: List[List[Tuple[int, int]]], k: int = 3) -> List[Tuple[int, int]]:
-        contenders = rng.sample(population, min(k, len(population)))
-        return min(contenders, key=fitness)
-
-    population: List[List[Tuple[int, int]]] = [greedy_flat[:]]
-    while len(population) < pop:
-        population.append(random_chrom())
-
-    for _ in range(gens):
-        next_population: List[List[Tuple[int, int]]] = []
-        elite = min(population, key=fitness)
-        next_population.append(elite[:])
-        while len(next_population) < pop:
-            parent1 = tournament(population)
-            parent2 = tournament(population)
-            child = ordered_crossover(parent1, parent2)
-            if rng.random() < pmut:
-                mutate(child)
-            next_population.append(child)
-        population = next_population
-
-    best = min(population, key=fitness)
-    parts = split_chrom(best)
-    result = {}
-    for idx, r in enumerate(robots):
-        result[r] = parts[idx]
-    return result
-
-
-def local_search_assign(
-    grid: List[List[int]],
-    robots: Sequence[Tuple[int, int]],
-    tasks: Sequence[Tuple[int, int]],
-    alg: str,
-    planner: PathLibrary,
-    iters: int = 2000,
-) -> Dict[Tuple[int, int], List[Tuple[int, int]]]:
-    assigned = greedy_assign(grid, robots, tasks, alg, planner)
-    flat = []
-    for r in robots:
-        flat.extend(assigned.get(r, []))
-    if not flat:
-        return assigned
-
-    rng = random.Random()
-    current = flat[:]
-
-    def split(chrom: Sequence[Tuple[int, int]]) -> List[List[Tuple[int, int]]]:
-        n = len(chrom)
-        num_robots = len(robots)
-        sizes = [n // num_robots] * num_robots
-        for i in range(n % num_robots):
-            sizes[i] += 1
-        idx = 0
-        parts = []
-        for s in sizes:
-            parts.append(list(chrom[idx : idx + s]))
-            idx += s
-        return parts
-
-    def score(chrom: Sequence[Tuple[int, int]]) -> float:
-        parts = split(chrom)
-        total = 0.0
-        for robot_idx, r in enumerate(robots):
-            cur = r
-            for t in parts[robot_idx]:
-                total += planner.cost(cur, t)
-                cur = t
-        return total
-
-    current_score = score(current)
-    best = current[:]
-    best_score = current_score
-
-    for _ in range(iters):
-        candidate = current[:]
-        if len(candidate) >= 2:
-            i, j = rng.sample(range(len(candidate)), 2)
-            candidate[i], candidate[j] = candidate[j], candidate[i]
-        if rng.random() < 0.25 and len(candidate) >= 3:
-            i, j = sorted(rng.sample(range(len(candidate)), 2))
-            segment = candidate[i:j]
-            candidate[i:j] = list(reversed(segment))
-        val = score(candidate)
-        if val < current_score or rng.random() < 0.05:
-            current = candidate
-            current_score = val
-            if val < best_score:
-                best = candidate
-                best_score = val
-
-    parts = split(best)
-    out = {}
-    for idx, r in enumerate(robots):
-        out[r] = parts[idx]
-    return out
-
-
-def compile_task_assignments(
-    robots: Sequence[Tuple[int, int]],
-    assigned: Dict[Tuple[int, int], List[Tuple[int, int]]],
-    planner: PathLibrary,
-) -> Tuple[List[dict], Dict[str, dict]]:
-    robot_payload = []
-    task_map: Dict[str, dict] = {}
-    for idx, robot in enumerate(robots):
-        color = ROBOT_COLORS[idx % len(ROBOT_COLORS)]
-        tasks_for_robot = assigned.get(robot, [])
-        legs = []
-        cur = robot
-        total_cost = 0.0
-        for order, task in enumerate(tasks_for_robot, start=1):
-            info = planner.ensure(cur, task)
-            legs.append(
-                {
-                    "order": order,
-                    "task": list(task),
-                    "cost": info["cost"],
-                    "path": info["path"],
-                }
-            )
-            total_cost += info["cost"]
-            cur = task
-            task_map[f"{task[0]},{task[1]}"] = {
-                "robot_index": idx,
-                "robot_start": list(robot),
-                "order": order,
-                "color": color,
-                "cost": info["cost"],
-            }
-        robot_payload.append(
-            {
-                "id": idx,
-                "color": color,
-                "start": list(robot),
-                "assignments": legs,
-                "total_cost": total_cost,
-            }
-        )
-    return robot_payload, task_map
-
-
-def csp_schedule(paths, moving_obstacles, max_offset=20):
-    max_path_len = 0
-    for seq in paths.values():
-        if isinstance(seq, list):
-            max_path_len = max(max_path_len, len(seq))
-    horizon = int(max_offset + max_path_len + 10)
-
-    obstruct = set()
-    obstruct_edges = set()
-    for ob in moving_obstacles:
-        p = ob.get("path", [])
-        L = len(p)
-        if L == 0:
-            continue
-        looping = bool(ob.get("loop", True))
-        for t in range(horizon + 1):
-            a = p[obstacle_timeline_index(L, t, looping)]
-            obstruct.add((a, t))
-            if L > 1:
-                next_idx = obstacle_timeline_index(L, t + 1, looping)
-                b = p[next_idx]
-                if a != b:
-                    obstruct_edges.add((a, b, t))
-
-    robots = list(paths.keys())
-    assigned = {}
-    nodes_expanded = 0
-
-    def backtrack(idx):
-        nonlocal nodes_expanded
-        if idx == len(robots):
-            return True
-        r = robots[idx]
-        P = paths[r]
-        for s in range(0, max_offset + 1):
-            nodes_expanded += 1
-            bad = False
-            for k, cell in enumerate(P):
-                t = s + k
-                if (cell, t) in obstruct:
-                    bad = True
-                    break
-            if bad:
-                continue
-            for k in range(len(P) - 1):
-                a = P[k]
-                b = P[k + 1]
-                t = s + k
-                if (b, a, t) in obstruct_edges:
-                    bad = True
-                    break
-            if bad:
-                continue
-            for other, so in assigned.items():
-                Po = paths[other]
-                for k, cell in enumerate(P):
-                    t = s + k
-                    for mo, k2 in enumerate(Po):
-                        if so + mo == t and k2 == cell:
-                            bad = True
-                            break
-                    if bad:
-                        break
-                if bad:
-                    break
-                for k in range(len(P) - 1):
-                    a = P[k]
-                    b = P[k + 1]
-                    t = s + k
-                    for mo in range(len(Po) - 1):
-                        a2 = Po[mo]
-                        b2 = Po[mo + 1]
-                        if so + mo == t and a == b2 and b == a2:
-                            bad = True
-                            break
-                    if bad:
-                        break
-                if bad:
-                    break
-            if bad:
-                continue
-            assigned[r] = s
-            if backtrack(idx + 1):
-                return True
-            del assigned[r]
-        return False
-
-    ok = backtrack(0)
-    return {"ok": ok, "start_times": assigned, "nodes": nodes_expanded}
-
-
-def build_timeline(path: List[Tuple[int, int]], tasks: List[Tuple[int, int]]) -> List[dict]:
-    timeline = []
-    task_iter = list(tasks)
-    reached = 0
-    for time_step, cell in enumerate(path):
-        marker = None
-        if reached < len(task_iter) and cell == task_iter[reached]:
-            reached += 1
-            marker = {
-                "task": list(cell),
-                "order": reached,
-            }
-        timeline.append(
-            {
-                "time": time_step,
-                "cell": list(cell),
-                "reached_task": marker,
-            }
-        )
-    return timeline
-
-
-def normalize_grid(grid_raw) -> List[List[int]]:
-    grid = []
-    for row in grid_raw:
-        grid.append([int(v) for v in row])
-    return grid
-
-
-def normalize_positions(seq) -> List[Tuple[int, int]]:
-    out = []
-    for item in seq:
-        out.append(parse_cell(item))
-    return out
-
-
-def snapshot_meta(
-    width: int,
-    height: int,
-    num_robots: int,
-    num_tasks: int,
-    num_moving: int,
-    seed: Optional[int],
-    density: float,
-) -> dict:
-    return {
-        "width": width,
-        "height": height,
-        "num_robots": num_robots,
-        "num_tasks": num_tasks,
-        "num_moving": num_moving,
-        "seed": seed,
-        "wall_density": density,
-    }
 
 
 @app.route("/api/generate_map", methods=["POST"])
@@ -957,10 +40,8 @@ def api_generate_map():
     seed_input = body.get("seed")
     seed = int(seed_input) if seed_input is not None else None
     rng = random.Random(seed)
-
     width = clamp_int(body.get("width", 30), 8, MAX_WIDTH)
     height = clamp_int(body.get("height", 20), 8, MAX_HEIGHT)
-
     wall_range = parse_range(
         body.get("wall_density_range"),
         DEFAULT_WALL_RANGE,
@@ -991,36 +72,30 @@ def api_generate_map():
         low=3,
         high=width * height,
     )
-
     num_robots_requested = body.get("num_robots")
     if num_robots_requested is not None:
         num_robots = clamp_int(int(num_robots_requested), 1, MAX_ROBOTS)
     else:
         num_robots = clamp_int(choose_from_range(rng, robot_range, integer=True), 1, MAX_ROBOTS)
-
     tasks_target = 3 * num_robots + 3
     tasks_min, tasks_max = task_range
     tasks_count = clamp_int(tasks_target, int(tasks_min), int(tasks_max))
-
     moving_requested = body.get("moving")
     if moving_requested is not None:
         moving_count = max(0, int(moving_requested))
     else:
         moving_count = max(0, choose_from_range(rng, moving_range, integer=True))
-
     grid, actual_density = generate_warehouse(seed, width, height, wall_range)
     free_cells = get_free_cells(grid)
     if not free_cells:
         free_cells = [(0, 0)]
-
     robots = select_unique_cells(rng, list(free_cells), num_robots, forbidden=set())
     remaining_free = [cell for cell in free_cells if cell not in robots]
     tasks = select_unique_cells(rng, remaining_free, tasks_count, forbidden=set(robots))
-    tasks = tasks or select_unique_cells(rng, list(free_cells), tasks_count, forbidden=set(robots))
-
+    if not tasks:
+        tasks = select_unique_cells(rng, list(free_cells), tasks_count, forbidden=set(robots))
     moving_count = min(moving_count, max_moving_cap)
     moving = generate_moving_obstacles(grid, moving_count, rng, robots, tasks)
-
     response = {
         "grid": grid,
         "tasks": [list(t) for t in tasks],
@@ -1053,12 +128,10 @@ def api_plan_tasks():
     tasks = normalize_positions(body.get("tasks", []))
     optimizer = body.get("optimizer", "greedy").lower()
     alg = body.get("path_alg", "astar")
-
     t_planning_start = time.perf_counter()
     planner = PathLibrary(grid, alg)
     active_robots, inactive_robots, assignable_tasks, unreachable_tasks = analyze_reachability(robots, tasks, planner)
-
-    assigned_subset: Dict[Tuple[int, int], List[Tuple[int, int]]] = {r: [] for r in active_robots}
+    assigned_subset = {r: [] for r in active_robots}
     if active_robots and assignable_tasks:
         if optimizer == "greedy":
             assigned_subset = greedy_assign(grid, active_robots, assignable_tasks, alg, planner)
@@ -1066,12 +139,10 @@ def api_plan_tasks():
             assigned_subset = ga_assign(grid, active_robots, assignable_tasks, alg, planner)
         else:
             assigned_subset = local_search_assign(grid, active_robots, assignable_tasks, alg, planner)
-
     assigned = {r: [] for r in robots}
     for robot, seq in assigned_subset.items():
         assigned[robot] = seq
     planning_time_ms = (time.perf_counter() - t_planning_start) * 1000.0
-
     robot_payload, task_map = compile_task_assignments(robots, assigned, planner)
     legacy_costs = {}
     for robot, entries in assigned.items():
@@ -1094,7 +165,6 @@ def api_plan_tasks():
             "legs": legs,
             "total_cost": total,
         }
-
     response = {
         "assigned": {str(list(k)): [list(t) for t in v] for k, v in assigned.items()},
         "robots": robot_payload,
@@ -1121,7 +191,6 @@ def api_compute_paths():
     rp_in = body.get("robot_plans", {})
     robot_plans = {parse_cell(k): [parse_cell(t) for t in v] for k, v in rp_in.items()}
     planner = PathLibrary(grid, alg)
-
     t_paths_start = time.perf_counter()
     base_paths = {}
     perrobot_stats = {}
@@ -1153,7 +222,6 @@ def api_compute_paths():
             "path_steps": max(len(full) - 1, 0),
         }
     path_compute_time_ms = (time.perf_counter() - t_paths_start) * 1000.0
-
     moving = body.get("moving", [])
     moving_obs = []
     for ob in moving:
@@ -1169,7 +237,6 @@ def api_compute_paths():
                 "loop": bool(ob.get("loop", True)),
             }
         )
-
     t_schedule_start = time.perf_counter()
     csp = csp_schedule(base_paths, moving_obs, max_offset=40)
     schedule_time_ms = (time.perf_counter() - t_schedule_start) * 1000.0
@@ -1180,7 +247,6 @@ def api_compute_paths():
         full = wait_segment + path
         robot_key = str(list(robot))
         scheduled_paths[robot_key] = [list(cell) for cell in full]
-
         entry = perrobot_stats.setdefault(robot_key, {})
         entry.setdefault("path_steps", max(len(path) - 1, 0))
         wait_steps = max(int(delay), 0)
@@ -1188,17 +254,14 @@ def api_compute_paths():
         entry["wait_steps"] = wait_steps
         entry["execution_steps"] = execution_steps
         entry["execution_time_s"] = execution_steps
-
     response_paths = {str(list(k)): [list(cell) for cell in v] for k, v in base_paths.items()}
     step_meta = {}
     for robot, path in scheduled_paths.items():
         key_robot = parse_cell(robot)
         timeline = build_timeline([tuple(cell) for cell in path], robot_plans.get(key_robot, []))
         step_meta[robot] = timeline
-
     if isinstance(csp.get("start_times"), dict):
         csp["start_times"] = {str(list(k)): v for k, v in csp["start_times"].items()}
-
     return jsonify(
         {
             "ok": True,
@@ -1216,22 +279,6 @@ def api_compute_paths():
     )
 
 
-def build_dynamic_obstacle_timeline(moving: List[dict], horizon: int, start_time: int = 0) -> Dict[int, Set[Tuple[int, int]]]:
-    timeline: Dict[int, Set[Tuple[int, int]]] = {}
-    for t in range(horizon + 1):
-        timeline[start_time + t] = set()
-    for ob in moving:
-        path = ob.get("path", [])
-        if not path:
-            continue
-        period = len(path)
-        looping = bool(ob.get("loop", True))
-        for idx in range(horizon + 1):
-            cell = parse_cell(path[obstacle_timeline_index(period, start_time + idx, looping)])
-            timeline[start_time + idx].add(cell)
-    return timeline
-
-
 @app.route("/api/replan", methods=["POST"])
 def api_replan():
     body = request.get_json() or {}
@@ -1241,15 +288,12 @@ def api_replan():
     moving = body.get("moving", [])
     current_time = int(body.get("current_time", 0))
     horizon = max(40, len(tasks_remaining) * 12)
-
     dynamic_timeline = {}
     if moving:
         dynamic_timeline = build_dynamic_obstacle_timeline(moving, horizon, current_time)
-
     if not tasks_remaining:
         return jsonify({"ok": True, "path": [list(start)]})
-
-    full_path: List[Tuple[int, int]] = []
+    full_path = []
     cur = start
     time_offset = current_time
     for goal in tasks_remaining:
@@ -1262,7 +306,6 @@ def api_replan():
             grid,
             cur,
             goal,
-            heuristic=manhattan,
             dynamic_obstacles={k: set(map(tuple, v)) for k, v in dyn_subset.items()},
         )
         if not path:
@@ -1276,111 +319,7 @@ def api_replan():
             full_path.extend(path)
         cur = goal
         time_offset += max(len(path) - 1, 0)
-
     return jsonify({"ok": True, "path": [list(cell) for cell in full_path]})
-
-
-def apply_wall_changes(grid, adds, removes):
-    height = len(grid)
-    width = len(grid[0]) if height else 0
-    new_grid = [row[:] for row in grid]
-    for cell in removes:
-        r, c = parse_cell(cell)
-        if 0 <= r < height and 0 <= c < width:
-            new_grid[r][c] = 0
-    for cell in adds:
-        r, c = parse_cell(cell)
-        if 0 <= r < height and 0 <= c < width:
-            new_grid[r][c] = 1
-    ensure_perimeter_clear(new_grid)
-    return new_grid
-
-
-def validate_positions(cells: Sequence[Tuple[int, int]], grid: List[List[int]]) -> List[Tuple[int, int]]:
-    height = len(grid)
-    width = len(grid[0]) if height else 0
-    out = []
-    for cell in cells:
-        r, c = cell
-        if 0 <= r < height and 0 <= c < width and grid[r][c] == 0:
-            out.append(cell)
-    return out
-
-
-def apply_manual_edits(payload: dict) -> Tuple[List[List[int]], List[List[int]], List[List[int]], List[dict], dict]:
-    grid = normalize_grid(payload.get("grid", []))
-    robots = normalize_positions(payload.get("robots", []))
-    tasks = normalize_positions(payload.get("tasks", []))
-    moving = payload.get("moving", [])
-    edits = payload.get("edits", {})
-
-    adds_walls = edits.get("walls", {}).get("add", [])
-    remove_walls = edits.get("walls", {}).get("remove", [])
-    grid = apply_wall_changes(grid, adds_walls, remove_walls)
-
-    add_tasks = normalize_positions(edits.get("tasks", {}).get("add", []))
-    remove_tasks = {tuple(parse_cell(cell)) for cell in edits.get("tasks", {}).get("remove", [])}
-
-    add_robots = normalize_positions(edits.get("robots", {}).get("add", []))
-    remove_robots = {tuple(parse_cell(cell)) for cell in edits.get("robots", {}).get("remove", [])}
-
-    new_tasks = [t for t in tasks if t not in remove_tasks]
-    for task in add_tasks:
-        if grid[task[0]][task[1]] == 0 and task not in new_tasks:
-            new_tasks.append(task)
-
-    new_robots = [r for r in robots if r not in remove_robots]
-    for robot in add_robots:
-        if grid[robot[0]][robot[1]] == 0 and robot not in new_robots:
-            new_robots.append(robot)
-    new_robots = new_robots[:MAX_ROBOTS]
-
-    forklift_edits = edits.get("forklifts", {})
-    move_existing = []
-    for ob in moving:
-        if isinstance(ob, dict):
-            move_existing.append(ob)
-    remove_indices = set(forklift_edits.get("remove", []))
-    updated_moving = [
-        ob for idx, ob in enumerate(move_existing) if idx not in remove_indices
-    ]
-    add_forklifts = forklift_edits.get("add", [])
-    for ob in add_forklifts:
-        path_raw = ob.get("path", [])
-        path = []
-        try:
-            path = [parse_cell(p) for p in path_raw]
-        except Exception:
-            path = []
-        if len(path) < 2:
-            continue
-        valid = True
-        for cell in path:
-            r, c = cell
-            if not (0 <= r < len(grid) and 0 <= c < len(grid[0])):
-                valid = False
-                break
-            if grid[r][c] == 1:
-                valid = False
-                break
-        if not valid:
-            continue
-        path, is_loop = ensure_forklift_loop(grid, path)
-        updated_moving.append(
-            {
-                "path": [list(cell) for cell in path],
-                "loop": is_loop or bool(ob.get("loop", True)),
-                "period": len(path),
-            }
-        )
-
-    report = {
-        "robots": len(new_robots),
-        "tasks": len(new_tasks),
-        "forklifts": len(updated_moving),
-    }
-
-    return grid, [list(r) for r in new_robots], [list(t) for t in new_tasks], updated_moving, report
 
 
 @app.route("/api/manual/apply", methods=["POST"])
@@ -1390,10 +329,8 @@ def api_manual_apply():
     grid, robots, tasks, moving, report = apply_manual_edits(body)
     if not confirm:
         return jsonify({"ok": True, "preview": report})
-
     if len(robots) > MAX_ROBOTS:
         robots = robots[:MAX_ROBOTS]
-
     response = {
         "ok": True,
         "grid": grid,
@@ -1406,5 +343,4 @@ def api_manual_apply():
 
 
 if __name__ == "__main__":
-    print("Starting backend on 5001")
     app.run(host="0.0.0.0", port=5001, debug=True)
