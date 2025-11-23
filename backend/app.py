@@ -334,6 +334,38 @@ def generate_moving_obstacles(
     return obstacles
 
 
+def analyze_reachability(
+    robots: Sequence[Tuple[int, int]],
+    tasks: Sequence[Tuple[int, int]],
+    planner: "PathLibrary",
+) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int]], List[Tuple[int, int]], List[Tuple[int, int]]]:
+    if not robots:
+        return [], [], list(tasks), []
+    if not tasks:
+        return list(robots), [], [], []
+
+    reachable_tasks: Set[Tuple[int, int]] = set()
+    active: List[Tuple[int, int]] = []
+    inactive: List[Tuple[int, int]] = []
+
+    for robot in robots:
+        robot_has_path = False
+        for task in tasks:
+            info = planner.ensure(robot, task)
+            if info.get("path"):
+                robot_has_path = True
+                reachable_tasks.add(task)
+        if robot_has_path:
+            active.append(robot)
+        else:
+            inactive.append(robot)
+
+    assignable_tasks = [task for task in tasks if task in reachable_tasks]
+    unreachable_tasks = [task for task in tasks if task not in reachable_tasks]
+
+    return active, inactive, assignable_tasks, unreachable_tasks
+
+
 class PathLibrary:
     def __init__(self, grid: List[List[int]], alg: str):
         self.grid = grid
@@ -888,13 +920,23 @@ def api_plan_tasks():
     optimizer = body.get("optimizer", "greedy").lower()
     alg = body.get("path_alg", "astar")
 
+    t_planning_start = time.perf_counter()
     planner = PathLibrary(grid, alg)
-    if optimizer == "greedy":
-        assigned = greedy_assign(grid, robots, tasks, alg, planner)
-    elif optimizer == "ga":
-        assigned = ga_assign(grid, robots, tasks, alg, planner)
-    else:
-        assigned = local_search_assign(grid, robots, tasks, alg, planner)
+    active_robots, inactive_robots, assignable_tasks, unreachable_tasks = analyze_reachability(robots, tasks, planner)
+
+    assigned_subset: Dict[Tuple[int, int], List[Tuple[int, int]]] = {r: [] for r in active_robots}
+    if active_robots and assignable_tasks:
+        if optimizer == "greedy":
+            assigned_subset = greedy_assign(grid, active_robots, assignable_tasks, alg, planner)
+        elif optimizer == "ga":
+            assigned_subset = ga_assign(grid, active_robots, assignable_tasks, alg, planner)
+        else:
+            assigned_subset = local_search_assign(grid, active_robots, assignable_tasks, alg, planner)
+
+    assigned = {r: [] for r in robots}
+    for robot, seq in assigned_subset.items():
+        assigned[robot] = seq
+    planning_time_ms = (time.perf_counter() - t_planning_start) * 1000.0
 
     robot_payload, task_map = compile_task_assignments(robots, assigned, planner)
     legacy_costs = {}
@@ -924,6 +966,15 @@ def api_plan_tasks():
         "robots": robot_payload,
         "task_assignments": task_map,
         "costs": legacy_costs,
+        "metrics": {
+            "planning_time_ms": planning_time_ms,
+            "robots_considered": len(robots),
+            "tasks_considered": len(tasks),
+            "active_robots": len(active_robots),
+            "inactive_robots": len(inactive_robots),
+            "assignable_tasks": len(assignable_tasks),
+            "unreachable_tasks": len(unreachable_tasks),
+        },
     }
     return jsonify(response)
 
@@ -937,6 +988,7 @@ def api_compute_paths():
     robot_plans = {parse_cell(k): [parse_cell(t) for t in v] for k, v in rp_in.items()}
     planner = PathLibrary(grid, alg)
 
+    t_paths_start = time.perf_counter()
     base_paths = {}
     perrobot_stats = {}
     for robot, seq in robot_plans.items():
@@ -960,11 +1012,13 @@ def api_compute_paths():
             elapsed += info["time"]
             cur = goal
         base_paths[robot] = full
-        perrobot_stats[str(list(robot))] = {
-            "nodes": nodes,
-            "time": elapsed,
-            "len": len(full),
+        robot_key = str(list(robot))
+        perrobot_stats[robot_key] = {
+            "planner_nodes": nodes,
+            "planner_time_s": elapsed,
+            "path_steps": max(len(full) - 1, 0),
         }
+    path_compute_time_ms = (time.perf_counter() - t_paths_start) * 1000.0
 
     moving = body.get("moving", [])
     moving_obs = []
@@ -982,13 +1036,24 @@ def api_compute_paths():
             }
         )
 
+    t_schedule_start = time.perf_counter()
     csp = csp_schedule(base_paths, moving_obs, max_offset=40)
+    schedule_time_ms = (time.perf_counter() - t_schedule_start) * 1000.0
     scheduled_paths = {}
     for robot, path in base_paths.items():
         delay = csp.get("start_times", {}).get(robot, 0)
         wait_segment = [path[0]] * int(delay) if path else []
         full = wait_segment + path
-        scheduled_paths[str(list(robot))] = [list(cell) for cell in full]
+        robot_key = str(list(robot))
+        scheduled_paths[robot_key] = [list(cell) for cell in full]
+
+        entry = perrobot_stats.setdefault(robot_key, {})
+        entry.setdefault("path_steps", max(len(path) - 1, 0))
+        wait_steps = max(int(delay), 0)
+        execution_steps = max(len(full) - 1, 0)
+        entry["wait_steps"] = wait_steps
+        entry["execution_steps"] = execution_steps
+        entry["execution_time_s"] = execution_steps
 
     response_paths = {str(list(k)): [list(cell) for cell in v] for k, v in base_paths.items()}
     step_meta = {}
@@ -1008,6 +1073,11 @@ def api_compute_paths():
             "stats": perrobot_stats,
             "step_metadata": step_meta,
             "csp": csp,
+            "timing": {
+                "path_compute_time_ms": path_compute_time_ms,
+                "schedule_time_ms": schedule_time_ms,
+                "total_execution_time_ms": path_compute_time_ms + schedule_time_ms,
+            },
         }
     )
 
