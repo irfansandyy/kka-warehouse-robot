@@ -10,6 +10,11 @@ body {
 .left {
   width: 72%;
   padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  box-sizing: border-box;
+  overflow: hidden;
 }
 .right {
   width: 28%;
@@ -42,10 +47,40 @@ body {
   border-radius: 6px;
   cursor: pointer;
 }
+.canvas-shell {
+  flex: 1;
+  min-height: 0;
+  padding: 14px;
+  border: 1px solid #dfe7f7;
+  border-radius: 14px;
+  background: #ffffff;
+  overflow: auto;
+  box-shadow: 0 8px 28px rgba(11, 105, 255, 0.08);
+}
+
+.canvas-shell::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.canvas-shell::-webkit-scrollbar-thumb {
+  background: #c2d5f5;
+  border-radius: 999px;
+}
+
+.canvas-shell::-webkit-scrollbar-track {
+  background: transparent;
+}
+
 .grid-canvas {
   background: #ffffff;
   border: 1px solid #e1e7f5;
   box-shadow: 0 6px 20px rgba(15, 38, 78, 0.06);
+  display: block;
+  width: max-content;
+  height: max-content;
+  min-width: 100%;
+  min-height: 100%;
 }
 .panel {
   margin-top: 10px;

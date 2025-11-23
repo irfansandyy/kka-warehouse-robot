@@ -12,12 +12,12 @@ app = Flask(__name__)
 CORS(app)
 
 MAX_ROBOTS = 5
-MAX_WIDTH = 60
-MAX_HEIGHT = 60
+MAX_WIDTH = 200
+MAX_HEIGHT = 200
 MAX_GENERATE_ATTEMPTS = 12
 DEFAULT_WALL_RANGE = (0.02, 0.06)
 DEFAULT_TASK_RANGE = (12, 24)
-DEFAULT_MOVING_RANGE = (1, 4)
+DEFAULT_MOVING_RANGE = (1, 6)
 DEFAULT_ROBOT_RANGE = (2, 4)
 FORKLIFT_PATH_MIN = 100
 FORKLIFT_PATH_MAX = 100
@@ -84,6 +84,11 @@ def manhattan(a: Tuple[int, int], b: Tuple[int, int]) -> int:
 
 def euclidean(a: Tuple[int, int], b: Tuple[int, int]) -> float:
     return math.hypot(a[0] - b[0], a[1] - b[1])
+
+
+def estimate_walkable_cells(width: int, height: int, density_range: Tuple[float, float]) -> int:
+    avg_density = clamp((density_range[0] + density_range[1]) / 2.0, 0.02, 0.45)
+    return max(1, int(width * height * (1.0 - avg_density)))
 
 
 def parse_cell(cell) -> Tuple[int, int]:
@@ -963,6 +968,8 @@ def api_generate_map():
         low=0.02,
         high=0.45,
     )
+    walkable_estimate = estimate_walkable_cells(width, height, wall_range)
+    max_moving_cap = clamp_int(max(10, walkable_estimate // 60), 0, width * height)
     robot_range = parse_range(
         body.get("robot_count_range"),
         DEFAULT_ROBOT_RANGE,
@@ -975,7 +982,7 @@ def api_generate_map():
         DEFAULT_MOVING_RANGE,
         integer=True,
         low=0,
-        high=10,
+        high=max(10, max_moving_cap),
     )
     task_range = parse_range(
         body.get("task_count_range"),
@@ -1011,6 +1018,7 @@ def api_generate_map():
     tasks = select_unique_cells(rng, remaining_free, tasks_count, forbidden=set(robots))
     tasks = tasks or select_unique_cells(rng, list(free_cells), tasks_count, forbidden=set(robots))
 
+    moving_count = min(moving_count, max_moving_cap)
     moving = generate_moving_obstacles(grid, moving_count, rng, robots, tasks)
 
     response = {
@@ -1200,9 +1208,9 @@ def api_compute_paths():
             "step_metadata": step_meta,
             "csp": csp,
             "timing": {
-                "path_compute_time_ms": path_compute_time_ms,
-                "schedule_time_ms": schedule_time_ms,
-                "total_execution_time_ms": path_compute_time_ms + schedule_time_ms,
+                "path_compute_time_ms": path_compute_time_ms * 1000,
+                "schedule_time_ms": schedule_time_ms * 1000,
+                "total_execution_time_ms": (path_compute_time_ms + schedule_time_ms) * 1000,
             },
         }
     )

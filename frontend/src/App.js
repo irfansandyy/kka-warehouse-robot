@@ -5,8 +5,8 @@ const BACKEND = "http://localhost:5001/api";
 const COLORS = ["#0b69ff", "#ff5f55", "#2dbf88", "#e2a72e", "#7b5fff"];
 const COMPLETED_COLOR = "#25a86b";
 const MAX_ROBOTS = 5;
-const MAX_WIDTH = 60;
-const MAX_HEIGHT = 60;
+const MAX_WIDTH = 200;
+const MAX_HEIGHT = 200;
 const EXECUTION_DETAIL_INLINE_LIMIT = 3;
 const FORKLIFT_MIN_STEPS = 10;
 const FORKLIFT_MAX_STEPS = 35;
@@ -240,6 +240,29 @@ function cellsEqual(a, b) {
   return Number(a[0]) === Number(b[0]) && Number(a[1]) === Number(b[1]);
 }
 
+function averageDensity(range) {
+  if (!range) return 0.08;
+  const lo = Number(range.min ?? range[0] ?? 0.02);
+  const hi = Number(range.max ?? range[1] ?? lo);
+  return clampNumber((lo + hi) / 2, 0.02, 0.45);
+}
+
+function estimateWalkableCells(width, height, wallRange) {
+  const avg = averageDensity(wallRange);
+  const area = Math.max(1, Number(width) * Number(height));
+  return Math.max(1, Math.floor(area * (1 - avg)));
+}
+
+function computeTaskCap(width, height, wallRange) {
+  const walkable = estimateWalkableCells(width, height, wallRange);
+  return Math.max(3, Math.min(width * height, Math.floor(walkable * 0.9)));
+}
+
+function computeMovingCap(width, height, wallRange) {
+  const walkable = estimateWalkableCells(width, height, wallRange);
+  return Math.max(10, Math.min(width * height, Math.floor(walkable / 60)));
+}
+
 function randomInt(min, max) {
   const lo = Math.ceil(min);
   const hi = Math.floor(max);
@@ -289,7 +312,7 @@ function buildRandomForkliftPath(grid, start, options = {}) {
   return path;
 }
 
-function RangeInput({ label, value, min, max, onChange, step = 1 }) {
+function RangeInput({ label, value, min, max, onChange, step = 1, hint }) {
   const handleMinChange = (e) => {
     const next = Number(e.target.value);
     onChange({ min: next, max: Math.max(next, value.max) });
@@ -304,6 +327,7 @@ function RangeInput({ label, value, min, max, onChange, step = 1 }) {
       <input type="number" value={value.min} step={step} min={min} max={max} onChange={handleMinChange} />
       <span>-</span>
       <input type="number" value={value.max} step={step} min={min} max={max} onChange={handleMaxChange} />
+      {hint && <span className="input-hint">{hint}</span>}
     </div>
   );
 }
@@ -1077,6 +1101,43 @@ export default function App() {
   );
 
   const clampSize = useCallback((value, min, max) => clampNumber(value, min, max), []);
+
+  const walkableEstimate = useMemo(
+    () => estimateWalkableCells(mapWidth, mapHeight, wallRange),
+    [mapWidth, mapHeight, wallRange]
+  );
+  const dynamicTaskMax = useMemo(
+    () => computeTaskCap(mapWidth, mapHeight, wallRange),
+    [mapWidth, mapHeight, wallRange]
+  );
+  const dynamicMovingMax = useMemo(
+    () => computeMovingCap(mapWidth, mapHeight, wallRange),
+    [mapWidth, mapHeight, wallRange]
+  );
+  const taskRangeHint = `≤ ${dynamicTaskMax.toLocaleString()} tasks (≈ ${walkableEstimate.toLocaleString()} walkable tiles)`;
+  const movingRangeHint = `0–${dynamicMovingMax} forklifts suggested (walkable ≈ ${walkableEstimate.toLocaleString()} tiles)`;
+
+  useEffect(() => {
+    setTaskRange((prev) => {
+      const cappedMin = Math.min(prev.min, dynamicTaskMax);
+      const cappedMax = Math.min(prev.max, dynamicTaskMax);
+      if (cappedMin === prev.min && cappedMax === prev.max) {
+        return prev;
+      }
+      return { min: cappedMin, max: Math.max(cappedMin, cappedMax) };
+    });
+  }, [dynamicTaskMax]);
+
+  useEffect(() => {
+    setMovingRange((prev) => {
+      const cappedMin = Math.min(prev.min, dynamicMovingMax);
+      const cappedMax = Math.min(prev.max, dynamicMovingMax);
+      if (cappedMin === prev.min && cappedMax === prev.max) {
+        return prev;
+      }
+      return { min: cappedMin, max: Math.max(cappedMin, cappedMax) };
+    });
+  }, [dynamicMovingMax]);
 
 
   const generateMap = useCallback(async () => {
@@ -1910,29 +1971,31 @@ export default function App() {
             Status: <strong>{status}</strong>
           </div>
         </div>
-        <CanvasGrid
-          grid={grid}
-          tasks={visibleTasks}
-          paths={paths}
-          robotsPositions={robotPositions}
-          moving={moving}
-          simTime={globalSimTime}
-          forkliftPositions={forkliftPositions}
-          taskAssignments={taskAssignments}
-          completedTasks={completedTasks}
-          editMode={isEditMode}
-          hoverCell={hoverCell}
-          pendingRobotAdds={pendingRobotAdds}
-          pendingRobotRemovals={pendingRobotRemovals}
-          pendingTaskAdds={pendingTaskAdds}
-          pendingTaskRemovals={pendingTaskRemovals}
-          pendingWallAdds={pendingWallAdds}
-          pendingWallRemovals={pendingWallRemovals}
-          pendingForkliftAdds={pendingForkliftAdds}
-          pendingForkliftRemovals={pendingForkliftRemovals}
-          onHoverCell={setHoverCell}
-          robotColorMap={robotColorMap}
-        />
+        <div className="canvas-shell">
+          <CanvasGrid
+            grid={grid}
+            tasks={visibleTasks}
+            paths={paths}
+            robotsPositions={robotPositions}
+            moving={moving}
+            simTime={globalSimTime}
+            forkliftPositions={forkliftPositions}
+            taskAssignments={taskAssignments}
+            completedTasks={completedTasks}
+            editMode={isEditMode}
+            hoverCell={hoverCell}
+            pendingRobotAdds={pendingRobotAdds}
+            pendingRobotRemovals={pendingRobotRemovals}
+            pendingTaskAdds={pendingTaskAdds}
+            pendingTaskRemovals={pendingTaskRemovals}
+            pendingWallAdds={pendingWallAdds}
+            pendingWallRemovals={pendingWallRemovals}
+            pendingForkliftAdds={pendingForkliftAdds}
+            pendingForkliftRemovals={pendingForkliftRemovals}
+            onHoverCell={setHoverCell}
+            robotColorMap={robotColorMap}
+          />
+        </div>
       </div>
 
       <div className="right">
@@ -2187,20 +2250,25 @@ export default function App() {
                 label="Tasks"
                 value={taskRange}
                 min={3}
-                max={mapWidth * mapHeight}
-                onChange={setTaskRange}
+                max={dynamicTaskMax}
+                hint={taskRangeHint}
+                onChange={(next) => {
+                  const min = Math.max(3, Math.min(Number(next.min), dynamicTaskMax));
+                  const max = Math.max(min, Math.min(Number(next.max), dynamicTaskMax));
+                  setTaskRange({ min, max });
+                }}
               />
               <RangeInput
                 label="Moving Obstacles"
                 value={movingRange}
                 min={0}
-                max={10}
-                onChange={(next) =>
-                  setMovingRange({
-                    min: Math.max(0, Number(next.min)),
-                    max: Math.max(Number(next.min), Number(next.max)),
-                  })
-                }
+                max={dynamicMovingMax}
+                hint={movingRangeHint}
+                onChange={(next) => {
+                  const min = Math.max(0, Math.min(Number(next.min), dynamicMovingMax));
+                  const max = Math.max(min, Math.min(Number(next.max), dynamicMovingMax));
+                  setMovingRange({ min, max });
+                }}
               />
             </div>
 
