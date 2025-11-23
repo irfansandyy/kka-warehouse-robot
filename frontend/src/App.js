@@ -1461,6 +1461,10 @@ export default function App() {
           .map((p) => [Number(p[0]), Number(p[1])])
       );
       forkliftLoopFlagsRef.current = moving.map((ob) => ob?.loop !== false);
+      const startingForkliftPositions = (forkliftPathsRef.current || []).map((path) =>
+        path?.length ? path[0] : null
+      );
+      setForkliftPositions(startingForkliftPositions);
 
       const zeroTimes = new Array(robots.length).fill(0);
       const zeroIndices = new Array(robots.length).fill(0);
@@ -1618,6 +1622,15 @@ export default function App() {
   const resumeAnimation = useCallback(() => {
     startAnimation(paths, { resume: true });
   }, [paths, startAnimation]);
+
+  const handleResetRun = useCallback(() => {
+    if (!paths || !Object.keys(paths).length) {
+      stopAnimation();
+      return;
+    }
+    stopAnimation();
+    initializeAnimationState(paths);
+  }, [initializeAnimationState, paths, stopAnimation]);
 
   const handleRobotShortcut = useCallback(() => {
     if (!isEditMode || !hoverCell || !grid?.length) return;
@@ -1924,6 +1937,7 @@ export default function App() {
   }, [handleRobotShortcut, handleTaskShortcut, handleWallShortcut, handleForkliftShortcut]);
 
   const prevEditModeRef = useRef(isEditMode);
+  const prevMovingRef = useRef(moving);
   useEffect(() => {
     if (prevEditModeRef.current && !isEditMode && hasPendingChanges) {
       applyManualChanges().catch((err) => console.error("Auto apply manual edits failed", err));
@@ -1977,12 +1991,11 @@ export default function App() {
     }
   };
 
-  // Keep forkliftPositions synced with moving when not animating.
   useEffect(() => {
-    if (!simPlaying) {
-      setForkliftPositions((moving || []).map((ob) => (ob?.path && ob.path.length ? ob.path[0] : null)));
-    }
-  }, [moving, simPlaying]);
+    if (prevMovingRef.current === moving) return;
+    setForkliftPositions((moving || []).map((ob) => (ob?.path && ob.path.length ? ob.path[0] : null)));
+    prevMovingRef.current = moving;
+  }, [moving]);
 
   return (
     <div className="app">
@@ -2035,8 +2048,8 @@ export default function App() {
               <button className="small" onClick={resumeAnimation}>
                 Resume
               </button>
-              <button className="small" onClick={() => startAnimation(paths)}>
-                Reset Run
+              <button className="small" onClick={handleResetRun}>
+                Reset
               </button>
             </>
           ) : (
