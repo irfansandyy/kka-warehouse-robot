@@ -864,6 +864,7 @@ export default function App() {
   const [optimizer, setOptimizer] = useState("greedy");
   const [speed, setSpeed] = useState(6);
   const [simPlaying, setSimPlaying] = useState(false);
+  const [simPaused, setSimPaused] = useState(false);
   const [robotPositions, setRobotPositions] = useState([]);
   const [robotTaskAssignments, setRobotTaskAssignments] = useState({});
   const [robotTaskIndices, setRobotTaskIndices] = useState([]);
@@ -974,6 +975,8 @@ export default function App() {
       ),
     [pendingForkliftAdds]
   );
+
+  const hasScheduledPaths = useMemo(() => paths && Object.keys(paths).length > 0, [paths]);
 
   const robotCount = robots.length;
 
@@ -1202,6 +1205,7 @@ export default function App() {
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
     rafRef.current = null;
     setSimPlaying(false);
+    setSimPaused(false);
     if (paths && Object.keys(paths).length > 0) {
       setStatus("scheduled");
     } else {
@@ -1229,6 +1233,21 @@ export default function App() {
     },
     [stopAnimation]
   );
+
+  const pauseAnimation = useCallback(() => {
+    if (rafRef.current) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    }
+    setSimPlaying(false);
+    if (paths && Object.keys(paths).length > 0) {
+      setSimPaused(true);
+      setStatus("paused");
+    } else {
+      setSimPaused(false);
+      setStatus("idle");
+    }
+  }, [paths]);
 
   const planTasks = useCallback(
     async (options = {}) => {
@@ -1393,15 +1412,8 @@ export default function App() {
     [grid, moving, paths, robotTaskAssignments, robotTaskIndices, isReplanning]
   );
 
-  const startAnimation = useCallback(
+  const initializeAnimationState = useCallback(
     (pathsObj) => {
-      // Avoid restarting if already playing with same paths
-      if (!pathsObj || !Object.keys(pathsObj).length || robots.length === 0) {
-        stopAnimation();
-        return;
-      }
-
-      // Preprocess robot paths mapped by robot index for efficiency
       const perRobotPaths = new Array(robots.length).fill(null).map(() => []);
       Object.entries(pathsObj).forEach(([key, rawPath]) => {
         const canonical = canonicalKey(key) || key;
@@ -1419,7 +1431,6 @@ export default function App() {
       });
       robotPathsRef.current = perRobotPaths;
 
-      // Preprocess assignments per robot index for task completion detection
       const perRobotAssignments = new Array(robots.length).fill(null).map(() => []);
       const perRobotTaskPathIndices = new Array(robots.length).fill(null).map(() => []);
       robots.forEach((robot, idx) => {
@@ -1428,13 +1439,12 @@ export default function App() {
           .map((cell) => parseCell(cell))
           .filter((c) => Array.isArray(c) && c.length === 2);
         perRobotAssignments[idx] = assigned;
-        // Build lookup map of path step indices for this robot
         const pathSteps = perRobotPaths[idx] || [];
         const indexMap = new Map();
         pathSteps.forEach((step, stepIdx) => {
           if (Array.isArray(step) && step.length === 2) {
             const key = `${step[0]},${step[1]}`;
-            if (!indexMap.has(key)) indexMap.set(key, stepIdx); // first occurrence
+            if (!indexMap.has(key)) indexMap.set(key, stepIdx);
           }
         });
         perRobotTaskPathIndices[idx] = assigned.map((t) => indexMap.get(`${t[0]},${t[1]}`));
@@ -1442,7 +1452,6 @@ export default function App() {
       robotAssignmentsRef.current = perRobotAssignments;
       robotTaskPathIndicesRef.current = perRobotTaskPathIndices;
 
-      // Forklift preprocessing
       forkliftPathsRef.current = moving.map((ob) =>
         (ob?.path || [])
           .map((step) => parseCell(step))
@@ -1453,7 +1462,6 @@ export default function App() {
       );
       forkliftLoopFlagsRef.current = moving.map((ob) => ob?.loop !== false);
 
-      // Reset timing and bookkeeping to ensure consistent playback
       const zeroTimes = new Array(robots.length).fill(0);
       const zeroIndices = new Array(robots.length).fill(0);
       timeRef.current = zeroTimes.slice();
@@ -1466,114 +1474,150 @@ export default function App() {
       setCompletedTasks(new Set());
       setRobotPositions(robots.map((r) => [r[0], r[1]]));
       setRobotLogs({});
-      setVisibleTasks(tasks); // restore all tasks visually at replay start
-      setSimPlaying(true);
-      setStatus("running");
+      setVisibleTasks(tasks);
+      return perRobotPaths.some((path) => path && path.length);
+    },
+    [robots, moving, robotTaskAssignments, tasks]
+  );
 
-      let lastTs = performance.now();
+  const runAnimationLoop = useCallback(() => {
+    const perRobotPaths = robotPathsRef.current || [];
+    const hasPaths = perRobotPaths.some((path) => path && path.length);
+    if (!hasPaths) {
+      stopAnimation();
+      return;
+    }
+    if (rafRef.current) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    }
+    setSimPlaying(true);
+    setSimPaused(false);
+    setStatus("running");
+    let lastTs = performance.now();
 
-      const frame = (now) => {
-        const dt = Math.max(0, (now - lastTs) / 1000);
-        lastTs = now;
-        const speedFactor = Math.max(0.01, speed);
-        globalTimeRef.current += dt * speedFactor;
-        setGlobalSimTime(globalTimeRef.current);
+    const frame = (now) => {
+      const currentPaths = robotPathsRef.current || [];
+      const assignments = robotAssignmentsRef.current || [];
+      const taskPathIdx = robotTaskPathIndicesRef.current || [];
+      const dt = Math.max(0, (now - lastTs) / 1000);
+      lastTs = now;
+      const speedFactor = Math.max(0.01, speed);
+      globalTimeRef.current += dt * speedFactor;
+      setGlobalSimTime(globalTimeRef.current);
 
-        const newTimes = [...timeRef.current];
-        const newPositions = robots.map((r) => [r[0], r[1]]);
-        const newTaskIndices = [...robotTaskIndicesRef.current];
-        const logs = {};
-        const completed = new Set(completedTasksRef.current);
+      const newTimes = [...timeRef.current];
+      const newPositions = robots.map((r) => [r[0], r[1]]);
+      const newTaskIndices = [...robotTaskIndicesRef.current];
+      const logs = {};
+      const completed = new Set(completedTasksRef.current);
 
-        perRobotPaths.forEach((pathSteps, idx) => {
-          if (!pathSteps || pathSteps.length === 0) return;
-          const currentT = timeRef.current[idx] || 0;
-          // Advance time proportionally (1 unit per step) — could refine with per-step cost later
-          const nextT = Math.min(pathSteps.length - 1, currentT + dt * speedFactor);
-            newTimes[idx] = nextT;
-          const baseIdx = Math.floor(nextT);
-          const nextIdx = Math.min(pathSteps.length - 1, baseIdx + 1);
-          const frac = Math.min(1, nextT - baseIdx);
-          const a = pathSteps[baseIdx];
-          const b = pathSteps[nextIdx] || a;
-          if (!a || !b) return;
-          const interp = [a[0] + (b[0] - a[0]) * frac, a[1] + (b[1] - a[1]) * frac];
-          newPositions[idx] = interp;
+      currentPaths.forEach((pathSteps, idx) => {
+        if (!pathSteps || pathSteps.length === 0) return;
+        const currentT = timeRef.current[idx] || 0;
+        const nextT = Math.min(pathSteps.length - 1, currentT + dt * speedFactor);
+        newTimes[idx] = nextT;
+        const baseIdx = Math.floor(nextT);
+        const nextIdx = Math.min(pathSteps.length - 1, baseIdx + 1);
+        const frac = Math.min(1, nextT - baseIdx);
+        const a = pathSteps[baseIdx];
+        const b = pathSteps[nextIdx] || a;
+        if (!a || !b) return;
+        const interp = [a[0] + (b[0] - a[0]) * frac, a[1] + (b[1] - a[1]) * frac];
+        newPositions[idx] = interp;
 
-          // Robust task completion detection: mark all assignment tasks whose path index has been reached.
-          const assignments = perRobotAssignments[idx];
-          const assignmentPathIndices = robotTaskPathIndicesRef.current[idx] || [];
-          let currentTaskIdx = newTaskIndices[idx] || 0;
-          while (
-            currentTaskIdx < assignments.length &&
-            Number.isFinite(assignmentPathIndices[currentTaskIdx]) &&
-            nextT >= assignmentPathIndices[currentTaskIdx]
-          ) {
-            const goal = assignments[currentTaskIdx];
-            completed.add(`${goal[0]},${goal[1]}`);
-            currentTaskIdx += 1;
-          }
-          newTaskIndices[idx] = currentTaskIdx;
-          const canonicalRobotKey = canonicalKey(robots[idx]) || JSON.stringify(robots[idx]);
-          const status = isReplanning[idx]
-            ? "Replanning..."
-            : newTaskIndices[idx] >= assignments.length
-            ? "Completed"
-            : "En route";
-          const upcomingStep = pathSteps[Math.min(pathSteps.length - 1, baseIdx + 1)];
-          const color = robotColorMap[canonicalRobotKey] || COLORS[idx % COLORS.length];
-          logs[canonicalRobotKey] = {
-            status,
-            position: formatCell(interp.map((v) => Number(v.toFixed(1)))),
-            target: assignments[newTaskIndices[idx]] ? formatCell(assignments[newTaskIndices[idx]]) : "N/A",
-            nextStep: upcomingStep ? formatCell(upcomingStep) : "N/A",
-            color,
-          };
-        });
+        const assignmentPathIndices = taskPathIdx[idx] || [];
+        const assignedTasks = assignments[idx] || [];
+        let currentTaskIdx = newTaskIndices[idx] || 0;
+        while (
+          currentTaskIdx < assignedTasks.length &&
+          Number.isFinite(assignmentPathIndices[currentTaskIdx]) &&
+          nextT >= assignmentPathIndices[currentTaskIdx]
+        ) {
+          const goal = assignedTasks[currentTaskIdx];
+          completed.add(`${goal[0]},${goal[1]}`);
+          currentTaskIdx += 1;
+        }
+        newTaskIndices[idx] = currentTaskIdx;
+        const canonicalRobotKey = canonicalKey(robots[idx]) || JSON.stringify(robots[idx]);
+        const status = isReplanning[idx]
+          ? "Replanning..."
+          : newTaskIndices[idx] >= assignedTasks.length
+          ? "Completed"
+          : "En route";
+        const upcomingStep = pathSteps[Math.min(pathSteps.length - 1, baseIdx + 1)];
+        const color = robotColorMap[canonicalRobotKey] || COLORS[idx % COLORS.length];
+        logs[canonicalRobotKey] = {
+          status,
+          position: formatCell(interp.map((v) => Number(v.toFixed(1)))),
+          target: assignedTasks[newTaskIndices[idx]] ? formatCell(assignedTasks[newTaskIndices[idx]]) : "N/A",
+          nextStep: upcomingStep ? formatCell(upcomingStep) : "N/A",
+          color,
+        };
+      });
 
-        // Forklift animation
-        const forkliftPos = forkliftPathsRef.current.map((pathSteps, fIdx) => {
-          if (!pathSteps || pathSteps.length === 0) return null;
-          if (pathSteps.length === 1) return pathSteps[0];
-          const loop = forkliftLoopFlagsRef.current[fIdx];
-          const progress = loop
-            ? globalTimeRef.current % pathSteps.length
-            : Math.min(globalTimeRef.current, pathSteps.length - 1);
-          const baseIdx = Math.floor(progress);
-          const nextIdx = loop ? (baseIdx + 1) % pathSteps.length : Math.min(pathSteps.length - 1, baseIdx + 1);
-          const frac = Math.min(1, progress - baseIdx);
-          const a = pathSteps[baseIdx];
-          const b = pathSteps[nextIdx] || a;
-          if (!a || !b) return pathSteps[baseIdx];
-          return [a[0] + (b[0] - a[0]) * frac, a[1] + (b[1] - a[1]) * frac];
-        });
+      const forkliftPos = (forkliftPathsRef.current || []).map((pathSteps, fIdx) => {
+        if (!pathSteps || pathSteps.length === 0) return null;
+        if (pathSteps.length === 1) return pathSteps[0];
+        const loop = forkliftLoopFlagsRef.current?.[fIdx];
+        const progress = loop
+          ? globalTimeRef.current % pathSteps.length
+          : Math.min(globalTimeRef.current, pathSteps.length - 1);
+        const baseIdx = Math.floor(progress);
+        const nextIdx = loop ? (baseIdx + 1) % pathSteps.length : Math.min(pathSteps.length - 1, baseIdx + 1);
+        const frac = Math.min(1, progress - baseIdx);
+        const a = pathSteps[baseIdx];
+        const b = pathSteps[nextIdx] || a;
+        if (!a || !b) return pathSteps[baseIdx];
+        return [a[0] + (b[0] - a[0]) * frac, a[1] + (b[1] - a[1]) * frac];
+      });
 
-        timeRef.current = newTimes;
-        setRobotSimTimes(newTimes);
-        setRobotPositions(newPositions);
-        setRobotTaskIndices(newTaskIndices);
-        robotTaskIndicesRef.current = newTaskIndices;
-        setRobotLogs(logs);
-        completedTasksRef.current = completed;
-        setCompletedTasks(new Set(completed));
-        setForkliftPositions(forkliftPos);
+      timeRef.current = newTimes;
+      setRobotSimTimes(newTimes);
+      setRobotPositions(newPositions);
+      setRobotTaskIndices(newTaskIndices);
+      robotTaskIndicesRef.current = newTaskIndices;
+      setRobotLogs(logs);
+      completedTasksRef.current = completed;
+      setCompletedTasks(new Set(completed));
+      setForkliftPositions(forkliftPos);
 
-        const allDone = perRobotPaths.every((p, idx) => !p.length || newTimes[idx] >= p.length - 1);
-        if (allDone) {
+      const allDone = currentPaths.every((p, idx) => !p?.length || newTimes[idx] >= p.length - 1);
+      if (allDone) {
+        stopAnimation();
+        return;
+      }
+      rafRef.current = requestAnimationFrame(frame);
+    };
+
+    rafRef.current = requestAnimationFrame(frame);
+  }, [robots, speed, isReplanning, robotColorMap, stopAnimation]);
+
+  const startAnimation = useCallback(
+    (pathsObj, options = {}) => {
+      const { resume = false } = options;
+      if (!pathsObj || !Object.keys(pathsObj).length || robots.length === 0) {
+        stopAnimation();
+        return;
+      }
+      if (!resume) {
+        const initialized = initializeAnimationState(pathsObj);
+        if (!initialized) {
           stopAnimation();
           return;
         }
-        rafRef.current = requestAnimationFrame(frame);
-      };
-
-      if (rafRef.current) {
-        cancelAnimationFrame(rafRef.current);
-        rafRef.current = null;
+      } else if (!robotPathsRef.current || robotPathsRef.current.every((p) => !p || p.length === 0)) {
+        stopAnimation();
+        return;
       }
-      rafRef.current = requestAnimationFrame(frame);
+      runAnimationLoop();
     },
-    [robots, moving, robotTaskAssignments, robotTaskIndices, speed, isReplanning, robotColorMap, stopAnimation]
+    [initializeAnimationState, runAnimationLoop, stopAnimation]
   );
+
+  const resumeAnimation = useCallback(() => {
+    startAnimation(paths, { resume: true });
+  }, [paths, startAnimation]);
 
   const handleRobotShortcut = useCallback(() => {
     if (!isEditMode || !hoverCell || !grid?.length) return;
@@ -1983,9 +2027,18 @@ export default function App() {
             <span className="value">{speed}x</span>
           </div>
           {simPlaying ? (
-            <button className="small" onClick={stopAnimation}>
+            <button className="small" onClick={pauseAnimation}>
               Pause
             </button>
+          ) : simPaused && hasScheduledPaths ? (
+            <>
+              <button className="small" onClick={resumeAnimation}>
+                Resume
+              </button>
+              <button className="small" onClick={() => startAnimation(paths)}>
+                Reset Run
+              </button>
+            </>
           ) : (
             <button className="small" onClick={() => startAnimation(paths)}>
               Play
