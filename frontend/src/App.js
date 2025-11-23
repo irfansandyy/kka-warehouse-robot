@@ -8,6 +8,8 @@ const MAX_ROBOTS = 5;
 const MAX_WIDTH = 60;
 const MAX_HEIGHT = 60;
 const EXECUTION_DETAIL_INLINE_LIMIT = 3;
+const FORKLIFT_MIN_STEPS = 10;
+const FORKLIFT_MAX_STEPS = 35;
 
 function createEmptyManualEdits() {
   return {
@@ -236,6 +238,55 @@ function cellKey(cell) {
 function cellsEqual(a, b) {
   if (!a || !b) return false;
   return Number(a[0]) === Number(b[0]) && Number(a[1]) === Number(b[1]);
+}
+
+function randomInt(min, max) {
+  const lo = Math.ceil(min);
+  const hi = Math.floor(max);
+  return Math.floor(Math.random() * (hi - lo + 1)) + lo;
+}
+
+function buildRandomForkliftPath(grid, start, options = {}) {
+  if (!Array.isArray(start) || start.length < 2) return [];
+  const height = grid?.length || 0;
+  const width = height ? grid[0].length : 0;
+  if (!height || !width) return [];
+  const minLen = Math.max(2, options.minLen ?? FORKLIFT_MIN_STEPS);
+  const maxLen = Math.max(minLen, options.maxLen ?? FORKLIFT_MAX_STEPS);
+  const targetLen = randomInt(minLen, maxLen);
+  const path = [[start[0], start[1]]];
+  let current = [start[0], start[1]];
+  let prev = null;
+
+  for (let step = 1; step < targetLen; step += 1) {
+    const neighbors = [];
+    const directions = [
+      [1, 0],
+      [-1, 0],
+      [0, 1],
+      [0, -1],
+    ];
+    directions.forEach(([dr, dc]) => {
+      const nr = current[0] + dr;
+      const nc = current[1] + dc;
+      if (nr < 0 || nc < 0 || nr >= height || nc >= width) return;
+      if (grid[nr][nc] !== 0) return;
+      neighbors.push([nr, nc]);
+    });
+    let candidates = neighbors;
+    if (prev && candidates.length > 1) {
+      const filtered = candidates.filter((cell) => !cellsEqual(cell, prev));
+      if (filtered.length) {
+        candidates = filtered;
+      }
+    }
+    if (!candidates.length) break;
+    const next = candidates[randomInt(0, candidates.length - 1)];
+    path.push(next);
+    prev = current;
+    current = next;
+  }
+  return path;
 }
 
 function RangeInput({ label, value, min, max, onChange, step = 1 }) {
@@ -1656,61 +1707,17 @@ export default function App() {
     }
 
     if (grid[row][col] === 1) {
-      alert("Cannot place a forklift loop on a wall cell.");
+      alert("Cannot place a forklift path on a wall cell.");
       return;
     }
 
-    const candidates = [
-      [
-        [0, 0],
-        [0, 1],
-        [1, 1],
-        [1, 0],
-        [0, 0],
-      ],
-      [
-        [0, 0],
-        [0, -1],
-        [1, -1],
-        [1, 0],
-        [0, 0],
-      ],
-      [
-        [0, 0],
-        [-1, 0],
-        [-1, 1],
-        [0, 1],
-        [0, 0],
-      ],
-      [
-        [0, 0],
-        [-1, 0],
-        [-1, -1],
-        [0, -1],
-        [0, 0],
-      ],
-    ];
-
-    let loop = null;
-    for (const offsets of candidates) {
-      const path = offsets.map(([dr, dc]) => [row + dr, col + dc]);
-      const cellsValid = path.every(([r, c]) => {
-        if (r < 0 || c < 0 || r >= grid.length || c >= grid[0].length) return false;
-        return grid[r][c] === 0;
-      });
-      if (!cellsValid) continue;
-      const uniqueCells = new Set(path.map((cell) => cellKey(cell)));
-      if (uniqueCells.size < 3) continue;
-      loop = path;
-      break;
-    }
-
-    if (!loop) {
-      alert("No clear space to create a forklift loop at that cell.");
+    const randomPath = buildRandomForkliftPath(grid, [row, col]);
+    if (!randomPath || randomPath.length < 2) {
+      alert("Could not build a random forklift path at that cell.");
       return;
     }
 
-    const signature = pathSignature(loop);
+    const signature = pathSignature(randomPath);
     if (pendingForkliftAddKeys.has(signature)) {
       setManualEdits((prev) => {
         const bucket = prev.forklifts || { add: [], remove: [] };
@@ -1731,7 +1738,7 @@ export default function App() {
       return {
         ...prev,
         forklifts: {
-          add: [...(bucket.add || []), { path: loop, loop: true }],
+          add: [...(bucket.add || []), { path: randomPath, loop: false }],
           remove: bucket.remove || [],
         },
       };

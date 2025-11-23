@@ -19,8 +19,8 @@ DEFAULT_WALL_RANGE = (0.02, 0.06)
 DEFAULT_TASK_RANGE = (12, 24)
 DEFAULT_MOVING_RANGE = (1, 4)
 DEFAULT_ROBOT_RANGE = (2, 4)
-FORKLIFT_PATH_MIN = 4
-FORKLIFT_PATH_MAX = 12
+FORKLIFT_PATH_MIN = 100
+FORKLIFT_PATH_MAX = 100
 ROBOT_COLORS = ["#0b69ff", "#ff5f55", "#2dbf88", "#e2a72e", "#7b5fff"]
 
 
@@ -80,6 +80,10 @@ def neighbors4(node: Tuple[int, int], height: int, width: int) -> Iterable[Tuple
 
 def manhattan(a: Tuple[int, int], b: Tuple[int, int]) -> int:
     return abs(a[0] - b[0]) + abs(a[1] - b[1])
+
+
+def euclidean(a: Tuple[int, int], b: Tuple[int, int]) -> float:
+    return math.hypot(a[0] - b[0], a[1] - b[1])
 
 
 def parse_cell(cell) -> Tuple[int, int]:
@@ -290,6 +294,61 @@ def build_forklift_loop(
     return full
 
 
+def build_forklift_random_walk(
+    grid: List[List[int]],
+    start: Tuple[int, int],
+    rng: random.Random,
+    min_len: int,
+    max_len: int,
+    blocked: Optional[Set[Tuple[int, int]]] = None,
+) -> List[Tuple[int, int]]:
+    height = len(grid)
+    width = len(grid[0]) if height else 0
+    target_len = max(2, rng.randint(min_len, max_len))
+    path = [start]
+    current = start
+    prev: Optional[Tuple[int, int]] = None
+    restricted = set(blocked or set())
+
+    for _ in range(target_len - 1):
+        candidates = []
+        for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            nr = current[0] + dr
+            nc = current[1] + dc
+            nxt = (nr, nc)
+            if not (0 <= nr < height and 0 <= nc < width):
+                continue
+            if grid[nr][nc] == 1 or nxt in restricted:
+                continue
+            candidates.append(nxt)
+        if prev is not None and len(candidates) > 1:
+            filtered = [cell for cell in candidates if cell != prev]
+            if filtered:
+                candidates = filtered
+        if not candidates:
+            break
+        nxt = rng.choice(candidates)
+        path.append(nxt)
+        prev = current
+        current = nxt
+    return path
+
+
+def ensure_forklift_loop(
+    grid: List[List[int]],
+    path: List[Tuple[int, int]],
+) -> Tuple[List[Tuple[int, int]], bool]:
+    if len(path) < 2:
+        return path, False
+    start = path[0]
+    end = path[-1]
+    closing = shortest_path(grid, end, start, blocked=set())
+    if closing and len(closing) > 1:
+        looped = path + closing[1:]
+        return looped, True
+    return path, False
+
+
 def generate_moving_obstacles(
     grid: List[List[int]],
     count: int,
@@ -309,29 +368,42 @@ def generate_moving_obstacles(
     obstacles = []
     occupied = set(base_blocked)
     for idx in range(count):
+        while free_cells and free_cells[-1] in occupied:
+            free_cells.pop()
         if not free_cells:
             break
         start = free_cells.pop()
-        loop = build_forklift_loop(
+        blocked_for_walk = set(occupied)
+        blocked_for_walk.discard(start)
+        walk = build_forklift_random_walk(
             grid,
             start,
             rng,
             FORKLIFT_PATH_MIN,
             FORKLIFT_PATH_MAX,
-            occupied,
+            blocked=blocked_for_walk,
         )
-        if not loop:
+        if not walk or len(walk) < 2:
             continue
-        occupied.update(loop)
+        walk, is_loop = ensure_forklift_loop(grid, walk)
+        occupied.update(walk)
         obstacles.append(
             {
                 "id": idx,
-                "path": loop,
-                "loop": True,
-                "period": len(loop),
+                "path": walk,
+                "loop": is_loop,
+                "period": len(walk),
             }
         )
     return obstacles
+
+
+def obstacle_timeline_index(length: int, step: int, loop: bool) -> int:
+    if length <= 0:
+        return 0
+    if loop:
+        return step % length
+    return min(step, length - 1)
 
 
 def analyze_reachability(
@@ -481,13 +553,21 @@ def greedy_assign(
     robot_pos = {r: r for r in robots}
     while remaining:
         best = None
+        best_dist = math.inf
         best_cost = math.inf
         for r in robots:
             cur = robot_pos[r]
             for t in remaining:
-                d = planner.cost(cur, t)
-                if d < best_cost:
-                    best_cost = d
+                cost = planner.cost(cur, t)
+                if cost == math.inf:
+                    continue
+                dist = euclidean(cur, t)
+                if dist < best_dist - 1e-6 or (
+                    math.isclose(dist, best_dist, rel_tol=1e-6, abs_tol=1e-6)
+                    and cost < best_cost
+                ):
+                    best_dist = dist
+                    best_cost = cost
                     best = (r, t)
         if best is None or best_cost == math.inf:
             break
@@ -504,17 +584,16 @@ def ga_assign(
     tasks: Sequence[Tuple[int, int]],
     alg: str,
     planner: PathLibrary,
-    pop: int = 24,
-    gens: int = 40,
-    pmut: float = 0.25,
+    pop: int = 40,
+    gens: int = 80,
+    pmut: float = 0.3,
 ) -> Dict[Tuple[int, int], List[Tuple[int, int]]]:
     if not tasks:
         return {r: [] for r in robots}
     rng = random.Random()
     num_robots = len(robots)
-
     greedy_seed = greedy_assign(grid, robots, tasks, alg, planner)
-    greedy_flat = []
+    greedy_flat: List[Tuple[int, int]] = []
     for r in robots:
         greedy_flat.extend(greedy_seed.get(r, []))
     if not greedy_flat:
@@ -532,7 +611,12 @@ def ga_assign(
             idx += s
         return out
 
+    fitness_cache: Dict[Tuple[Tuple[int, int], ...], float] = {}
+
     def fitness(chrom: Sequence[Tuple[int, int]]) -> float:
+        key = tuple(chrom)
+        if key in fitness_cache:
+            return fitness_cache[key]
         parts = split_chrom(chrom)
         total = 0.0
         for robot_idx, r in enumerate(robots):
@@ -540,30 +624,59 @@ def ga_assign(
             for t in parts[robot_idx]:
                 total += planner.cost(cur, t)
                 cur = t
+        fitness_cache[key] = total
         return total
 
-    population: List[List[Tuple[int, int]]] = []
-    base = list(tasks)
-    population.append(greedy_flat)
-    for _ in range(pop - 1):
-        rng.shuffle(base)
-        population.append(base[:])
+    def random_chrom() -> List[Tuple[int, int]]:
+        perm = list(tasks)
+        rng.shuffle(perm)
+        return perm
+
+    def ordered_crossover(a: Sequence[Tuple[int, int]], b: Sequence[Tuple[int, int]]) -> List[Tuple[int, int]]:
+        if len(a) < 2:
+            return list(a)
+        i, j = sorted(rng.sample(range(len(a)), 2))
+        child: List[Optional[Tuple[int, int]]] = [None] * len(a)
+        child[i : j + 1] = a[i : j + 1]
+        fill_idx = (j + 1) % len(a)
+        for candidate in b:
+            if candidate in child:
+                continue
+            child[fill_idx] = candidate
+            fill_idx = (fill_idx + 1) % len(a)
+        return [step for step in child if step is not None]
+
+    def mutate(chrom: List[Tuple[int, int]]):
+        if len(chrom) < 2:
+            return
+        i, j = sorted(rng.sample(range(len(chrom)), 2))
+        if rng.random() < 0.5:
+            chrom[i], chrom[j] = chrom[j], chrom[i]
+        else:
+            segment = chrom[i:j]
+            rng.shuffle(segment)
+            chrom[i:j] = segment
+
+    def tournament(population: List[List[Tuple[int, int]]], k: int = 3) -> List[Tuple[int, int]]:
+        contenders = rng.sample(population, min(k, len(population)))
+        return min(contenders, key=fitness)
+
+    population: List[List[Tuple[int, int]]] = [greedy_flat[:]]
+    while len(population) < pop:
+        population.append(random_chrom())
 
     for _ in range(gens):
-        scored = sorted(((fitness(chrom), chrom) for chrom in population), key=lambda x: x[0])
-        survivors = [scored[0][1], scored[1][1]]
-        while len(survivors) < pop:
-            parents = rng.sample(scored[: max(2, pop // 3)], k=2)
-            a = parents[0][1]
-            b = parents[1][1]
-            cut = rng.randint(0, len(tasks) - 1)
-            prefix = a[:cut]
-            child = prefix + [x for x in b if x not in prefix]
-            if rng.random() < pmut and len(child) > 1:
-                i, j = rng.sample(range(len(child)), 2)
-                child[i], child[j] = child[j], child[i]
-            survivors.append(child)
-        population = survivors
+        next_population: List[List[Tuple[int, int]]] = []
+        elite = min(population, key=fitness)
+        next_population.append(elite[:])
+        while len(next_population) < pop:
+            parent1 = tournament(population)
+            parent2 = tournament(population)
+            child = ordered_crossover(parent1, parent2)
+            if rng.random() < pmut:
+                mutate(child)
+            next_population.append(child)
+        population = next_population
 
     best = min(population, key=fitness)
     parts = split_chrom(best)
@@ -579,7 +692,7 @@ def local_search_assign(
     tasks: Sequence[Tuple[int, int]],
     alg: str,
     planner: PathLibrary,
-    iters: int = 1500,
+    iters: int = 2000,
 ) -> Dict[Tuple[int, int], List[Tuple[int, int]]]:
     assigned = greedy_assign(grid, robots, tasks, alg, planner)
     flat = []
@@ -589,7 +702,7 @@ def local_search_assign(
         return assigned
 
     rng = random.Random()
-    best = flat[:]
+    current = flat[:]
 
     def split(chrom: Sequence[Tuple[int, int]]) -> List[List[Tuple[int, int]]]:
         n = len(chrom)
@@ -614,15 +727,26 @@ def local_search_assign(
                 cur = t
         return total
 
-    best_score = score(best)
+    current_score = score(current)
+    best = current[:]
+    best_score = current_score
+
     for _ in range(iters):
-        i, j = rng.sample(range(len(best)), 2)
-        candidate = best[:]
-        candidate[i], candidate[j] = candidate[j], candidate[i]
+        candidate = current[:]
+        if len(candidate) >= 2:
+            i, j = rng.sample(range(len(candidate)), 2)
+            candidate[i], candidate[j] = candidate[j], candidate[i]
+        if rng.random() < 0.25 and len(candidate) >= 3:
+            i, j = sorted(rng.sample(range(len(candidate)), 2))
+            segment = candidate[i:j]
+            candidate[i:j] = list(reversed(segment))
         val = score(candidate)
-        if val < best_score:
-            best = candidate
-            best_score = val
+        if val < current_score or rng.random() < 0.05:
+            current = candidate
+            current_score = val
+            if val < best_score:
+                best = candidate
+                best_score = val
 
     parts = split(best)
     out = {}
@@ -689,11 +813,13 @@ def csp_schedule(paths, moving_obstacles, max_offset=20):
         L = len(p)
         if L == 0:
             continue
+        looping = bool(ob.get("loop", True))
         for t in range(horizon + 1):
-            a = p[t % L]
+            a = p[obstacle_timeline_index(L, t, looping)]
             obstruct.add((a, t))
             if L > 1:
-                b = p[(t + 1) % L]
+                next_idx = obstacle_timeline_index(L, t + 1, looping)
+                b = p[next_idx]
                 if a != b:
                     obstruct_edges.add((a, b, t))
 
@@ -1091,8 +1217,9 @@ def build_dynamic_obstacle_timeline(moving: List[dict], horizon: int, start_time
         if not path:
             continue
         period = len(path)
+        looping = bool(ob.get("loop", True))
         for idx in range(horizon + 1):
-            cell = parse_cell(path[(start_time + idx) % period])
+            cell = parse_cell(path[obstacle_timeline_index(period, start_time + idx, looping)])
             timeline[start_time + idx].add(cell)
     return timeline
 
@@ -1230,10 +1357,11 @@ def apply_manual_edits(payload: dict) -> Tuple[List[List[int]], List[List[int]],
                 break
         if not valid:
             continue
+        path, is_loop = ensure_forklift_loop(grid, path)
         updated_moving.append(
             {
                 "path": [list(cell) for cell in path],
-                "loop": bool(ob.get("loop", True)),
+                "loop": is_loop or bool(ob.get("loop", True)),
                 "period": len(path),
             }
         )
