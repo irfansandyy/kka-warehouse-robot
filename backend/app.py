@@ -1208,9 +1208,9 @@ def api_compute_paths():
             "step_metadata": step_meta,
             "csp": csp,
             "timing": {
-                "path_compute_time_ms": path_compute_time_ms * 1000,
-                "schedule_time_ms": schedule_time_ms * 1000,
-                "total_execution_time_ms": (path_compute_time_ms + schedule_time_ms) * 1000,
+                "path_compute_time_ms": path_compute_time_ms,
+                "schedule_time_ms": schedule_time_ms,
+                "total_execution_time_ms": path_compute_time_ms + schedule_time_ms,
             },
         }
     )

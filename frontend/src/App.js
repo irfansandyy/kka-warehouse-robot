@@ -1144,8 +1144,8 @@ export default function App() {
     setStatus("generating");
     try {
       const res = await axios.post(`${BACKEND}/generate_map`, {
-        width: clampSize(mapWidth, 8, 60),
-        height: clampSize(mapHeight, 8, 60),
+        width: clampSize(mapWidth, 8, MAX_WIDTH),
+        height: clampSize(mapHeight, 8, MAX_HEIGHT),
         seed: seed || undefined,
         wall_density_range: wallRange,
         task_count_range: taskRange,
@@ -1218,6 +1218,8 @@ export default function App() {
       setSelectedRobotKey(null);
       setMetricDetail(null);
       setStats({});
+      completedTasksRef.current = new Set();
+      setCompletedTasks(new Set());
       if (clearAssignments) {
         setRobotSummaries([]);
         setTaskAssignments({});
@@ -1765,12 +1767,15 @@ export default function App() {
     const [row, col] = hoverCell;
     if (row < 0 || col < 0 || row >= grid.length || col >= grid[0].length) return;
 
-    const existingIdx = moving.findIndex((ob) =>
-      (ob?.path || [])
-        .map((step) => parseCell(step))
-        .filter(Boolean)
-        .some((cell) => cellsEqual(cell, hoverCell))
-    );
+    const existingIdx = moving.findIndex((ob) => {
+      if (!ob?.path || ob.path.length === 0) return false;
+      try {
+        const firstCell = parseCell(ob.path[0]);
+        return firstCell ? cellsEqual(firstCell, hoverCell) : false;
+      } catch (err) {
+        return false;
+      }
+    });
 
     if (existingIdx !== -1) {
       setManualEdits((prev) => {
