@@ -136,6 +136,12 @@ function CanvasGrid({
   hoverCell,
   pendingRobotAdds,
   pendingRobotRemovals,
+  pendingTaskAdds,
+  pendingTaskRemovals,
+  pendingWallAdds,
+  pendingWallRemovals,
+  pendingForkliftAdds,
+  pendingForkliftRemovals,
   onHoverCell,
   robotColorMap,
 }) {
@@ -217,6 +223,15 @@ function CanvasGrid({
         ctx.fillRect(pos[1] * cell + 6, pos[0] * cell + 6, cell - 12, cell - 12);
       });
     }
+    // Fallback: if no forkliftPositions yet but moving obstacles exist, draw their first cell.
+    if ((!forkliftPositions || forkliftPositions.length === 0) && Array.isArray(moving)) {
+      moving.forEach((ob) => {
+        const first = ob?.path?.[0];
+        if (!Array.isArray(first) || first.length < 2) return;
+        ctx.fillStyle = "#f5533e";
+        ctx.fillRect(first[1] * cell + 6, first[0] * cell + 6, cell - 12, cell - 12);
+      });
+    }
 
     if (robotsPositions) {
       robotsPositions.forEach((pos, idx) => {
@@ -273,6 +288,115 @@ function CanvasGrid({
       ctx.stroke();
       ctx.restore();
     });
+
+    // Pending task additions (dashed yellow circles)
+    (pendingTaskAdds || []).forEach((task, idx) => {
+      if (!Array.isArray(task) || task.length < 2) return;
+      const [r, c] = task;
+      ctx.save();
+      ctx.setLineDash([4, 3]);
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = "#ffcc00";
+      ctx.fillStyle = "rgba(255,204,0,0.25)";
+      ctx.beginPath();
+      ctx.arc(c * cell + cell / 2, r * cell + cell / 2, cell / 3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = "#664d00";
+      ctx.font = "bold 11px Inter";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(`+${idx + 1}`, c * cell + cell / 2, r * cell + cell / 2);
+      ctx.restore();
+    });
+
+    // Pending task removals (red X over existing task cell center)
+    (pendingTaskRemovals || []).forEach((task) => {
+      if (!Array.isArray(task) || task.length < 2) return;
+      const [r, c] = task;
+      ctx.save();
+      ctx.strokeStyle = "#f5533e";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(c * cell + 6, r * cell + 6);
+      ctx.lineTo(c * cell + cell - 6, r * cell + cell - 6);
+      ctx.moveTo(c * cell + cell - 6, r * cell + 6);
+      ctx.lineTo(c * cell + 6, r * cell + cell - 6);
+      ctx.stroke();
+      ctx.restore();
+    });
+
+    // Pending wall additions (dashed dark cell)
+    (pendingWallAdds || []).forEach((cellPos) => {
+      if (!Array.isArray(cellPos) || cellPos.length < 2) return;
+      const [r, c] = cellPos;
+      ctx.save();
+      ctx.setLineDash([4, 3]);
+      ctx.strokeStyle = "#24354e";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(c * cell + 2, r * cell + 2, cell - 4, cell - 4);
+      ctx.restore();
+    });
+
+    // Pending wall removals (red X over wall cell)
+    (pendingWallRemovals || []).forEach((cellPos) => {
+      if (!Array.isArray(cellPos) || cellPos.length < 2) return;
+      const [r, c] = cellPos;
+      ctx.save();
+      ctx.strokeStyle = "#f5533e";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(c * cell + 4, r * cell + 4);
+      ctx.lineTo(c * cell + cell - 4, r * cell + cell - 4);
+      ctx.moveTo(c * cell + cell - 4, r * cell + 4);
+      ctx.lineTo(c * cell + 4, r * cell + cell - 4);
+      ctx.stroke();
+      ctx.restore();
+    });
+
+    // Pending forklift additions (dashed path)
+    (pendingForkliftAdds || []).forEach((ob, idx) => {
+      const path = ob?.path || [];
+      const pts = path.filter((p) => Array.isArray(p) && p.length === 2);
+      if (pts.length < 2) return;
+      ctx.save();
+      ctx.setLineDash([6, 4]);
+      ctx.strokeStyle = "#f5533e";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(pts[0][1] * cell + cell / 2, pts[0][0] * cell + cell / 2);
+      for (let i = 1; i < pts.length; i += 1) {
+        ctx.lineTo(pts[i][1] * cell + cell / 2, pts[i][0] * cell + cell / 2);
+      }
+      ctx.stroke();
+      // Mark start
+      ctx.fillStyle = "#f5533e";
+      ctx.font = "bold 11px Inter";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(`F+${idx + 1}`, pts[0][1] * cell + cell / 2, pts[0][0] * cell + cell / 2);
+      ctx.restore();
+    });
+
+    // Pending forklift removals (cross on first cell of existing obstacle index)
+    (pendingForkliftRemovals || []).forEach((remIdx) => {
+      if (!Array.isArray(moving)) return;
+      const ob = moving[remIdx];
+      const first = ob?.path?.[0];
+      const start = Array.isArray(first) && first.length === 2 ? first : null;
+      if (!start) return;
+      const [r, c] = start;
+      ctx.save();
+      ctx.strokeStyle = "#ba1e00";
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      ctx.moveTo(c * cell + 6, r * cell + 6);
+      ctx.lineTo(c * cell + cell - 6, r * cell + cell - 6);
+      ctx.moveTo(c * cell + cell - 6, r * cell + 6);
+      ctx.lineTo(c * cell + 6, r * cell + cell - 6);
+      ctx.stroke();
+      ctx.restore();
+    });
   }, [
     grid,
     tasks,
@@ -287,6 +411,12 @@ function CanvasGrid({
     hoverCell,
     pendingRobotAdds,
     pendingRobotRemovals,
+    pendingTaskAdds,
+    pendingTaskRemovals,
+    pendingWallAdds,
+    pendingWallRemovals,
+    pendingForkliftAdds,
+    pendingForkliftRemovals,
     robotColorMap,
   ]);
 
@@ -1299,13 +1429,36 @@ export default function App() {
       setTasks(res.data.tasks || tasks);
       setVisibleTasks(res.data.tasks || tasks);
       setMoving(res.data.moving || moving);
+      // Initialize forkliftPositions from updated moving obstacle paths.
+      const updatedMoving = res.data.moving || moving || [];
+      setForkliftPositions(updatedMoving.map((ob) => (ob?.path && ob.path.length ? ob.path[0] : null)));
       setManualEdits(createEmptyManualEdits());
-      await planTasks();
+      // Clear any existing schedule/path data; user can manually trigger planning later.
+      setPaths({});
+      setRobotSummaries([]);
+      setTaskAssignments({});
+      setRobotTaskAssignments({});
+      setRobotTaskIndices(new Array((res.data.robots || robots).length).fill(0));
+      setIsReplanning(new Array((res.data.robots || robots).length).fill(false));
+      setRobotSimTimes(new Array((res.data.robots || robots).length).fill(0));
+      setRobotPositions((res.data.robots || robots).map((r) => [r[0], r[1]]));
+      setRobotLogs({});
+      setStepMetadata({});
+      completedTasksRef.current = new Set();
+      setCompletedTasks(new Set());
+      setStatus("edits applied");
     } catch (err) {
       console.error("manual apply failed", err);
       setStatus("error");
     }
   };
+
+  // Keep forkliftPositions synced with moving when not animating.
+  useEffect(() => {
+    if (!simPlaying) {
+      setForkliftPositions((moving || []).map((ob) => (ob?.path && ob.path.length ? ob.path[0] : null)));
+    }
+  }, [moving, simPlaying]);
 
   return (
     <div className="app">
@@ -1383,6 +1536,12 @@ export default function App() {
           hoverCell={hoverCell}
           pendingRobotAdds={pendingRobotAdds}
           pendingRobotRemovals={pendingRobotRemovals}
+          pendingTaskAdds={pendingTaskAdds}
+          pendingTaskRemovals={pendingTaskRemovals}
+          pendingWallAdds={pendingWallAdds}
+          pendingWallRemovals={pendingWallRemovals}
+          pendingForkliftAdds={pendingForkliftAdds}
+          pendingForkliftRemovals={pendingForkliftRemovals}
           onHoverCell={setHoverCell}
           robotColorMap={robotColorMap}
         />
@@ -1395,6 +1554,27 @@ export default function App() {
             {mapMeta
               ? `Grid ${mapMeta.width}x${mapMeta.height} | Robots ${mapMeta.num_robots} | Tasks ${mapMeta.num_tasks} | Forklifts ${mapMeta.num_moving}`
               : "N/A"}
+          </div>
+        </div>
+
+        <div className="stat">
+          <div className="label">Legend</div>
+          <div className="legend">
+            {robots.map((_, idx) => (
+              <div key={idx} className="legend-item">
+                <span className="dot" style={{ background: COLORS[idx % COLORS.length] }} />
+                Robot {idx + 1}
+              </div>
+            ))}
+            <div className="legend-item">
+              <span className="dot" style={{ background: "#ffcc00" }} /> Task
+            </div>
+            <div className="legend-item">
+              <span className="dot" style={{ background: COMPLETED_COLOR }} /> Completed Task
+            </div>
+            <div className="legend-item">
+              <span className="dot" style={{ background: "#f5533e" }} /> Forklift
+            </div>
           </div>
         </div>
 
@@ -1526,27 +1706,6 @@ export default function App() {
             )}
           </div>
         )}
-
-        <div className="stat">
-          <div className="label">Legend</div>
-          <div className="legend">
-            {robots.map((_, idx) => (
-              <div key={idx} className="legend-item">
-                <span className="dot" style={{ background: COLORS[idx % COLORS.length] }} />
-                Robot {idx + 1}
-              </div>
-            ))}
-            <div className="legend-item">
-              <span className="dot" style={{ background: "#ffcc00" }} /> Task
-            </div>
-            <div className="legend-item">
-              <span className="dot" style={{ background: COMPLETED_COLOR }} /> Completed Task
-            </div>
-            <div className="legend-item">
-              <span className="dot" style={{ background: "#f5533e" }} /> Forklift
-            </div>
-          </div>
-        </div>
       </div>
 
       {showSettings && (
