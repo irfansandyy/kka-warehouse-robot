@@ -1198,57 +1198,94 @@ export default function App() {
     generateMap();
   }, [generateMap]);
 
-  async function planTasks() {
-    setStatus("planning");
-    try {
-      const payload = {
-        grid,
-        robots,
-        tasks,
-        optimizer,
-        path_alg: selectedAlg === "astar" ? "astar" : "dijkstra",
-      };
-      const res = await axios.post(`${BACKEND}/plan_tasks`, payload);
-      const data = res.data || {};
-      setStatus("planned");
-      setRobotSummaries(data.robots || []);
-      setTaskAssignments(data.task_assignments || {});
-      setStats((prev) => ({
-        ...prev,
-        plan: {
-          costs: data.costs || {},
-          timing: data.metrics || {},
-        },
-      }));
-
-      const assignments = {};
-      Object.entries(data.assigned || {}).forEach(([robotKey, assignedTasks]) => {
-        const parsedRobot = parseCell(robotKey);
-        const canonical = parsedRobot ? canonicalKey(parsedRobot) : null;
-        const parsedTasks = (assignedTasks || [])
-          .map((task) => parseCell(task))
-          .filter((cell) => Array.isArray(cell) && cell.length === 2);
-        assignments[robotKey] = parsedTasks;
-        if (canonical && canonical !== robotKey) {
-          assignments[canonical] = parsedTasks;
-        }
-      });
-      setRobotTaskAssignments(assignments);
-      setRobotTaskIndices(new Array(robots.length).fill(0));
-      setIsReplanning(new Array(robots.length).fill(false));
-      return data;
-    } catch (err) {
-      console.error("planTasks failed", err);
-      setStatus("error");
-      throw err;
+  const stopAnimation = useCallback(() => {
+    if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    rafRef.current = null;
+    setSimPlaying(false);
+    if (paths && Object.keys(paths).length > 0) {
+      setStatus("scheduled");
+    } else {
+      setStatus("idle");
     }
-  }
+  }, [paths]);
 
-  async function computePathsAndSchedule() {
-    stopAnimation();
+  const resetSimulationUi = useCallback(
+    ({ clearAssignments = false } = {}) => {
+      stopAnimation();
+      setPaths({});
+      setStepMetadata({});
+      setRobotLogs({});
+      setSelectedRobotKey(null);
+      setMetricDetail(null);
+      setStats({});
+      if (clearAssignments) {
+        setRobotSummaries([]);
+        setTaskAssignments({});
+        setRobotTaskAssignments({});
+        setRobotTaskIndices([]);
+      }
+    },
+    [stopAnimation]
+  );
+
+  const planTasks = useCallback(
+    async (options = {}) => {
+      const { skipReset = false } = options;
+      if (!skipReset) {
+        resetSimulationUi({ clearAssignments: true });
+      }
+      setStatus("planning");
+      try {
+        const payload = {
+          grid,
+          robots,
+          tasks,
+          optimizer,
+          path_alg: selectedAlg === "astar" ? "astar" : "dijkstra",
+        };
+        const res = await axios.post(`${BACKEND}/plan_tasks`, payload);
+        const data = res.data || {};
+        setStatus("planned");
+        setRobotSummaries(data.robots || []);
+        setTaskAssignments(data.task_assignments || {});
+        setStats((prev) => ({
+          ...prev,
+          plan: {
+            costs: data.costs || {},
+            timing: data.metrics || {},
+          },
+        }));
+
+        const assignments = {};
+        Object.entries(data.assigned || {}).forEach(([robotKey, assignedTasks]) => {
+          const parsedRobot = parseCell(robotKey);
+          const canonical = parsedRobot ? canonicalKey(parsedRobot) : null;
+          const parsedTasks = (assignedTasks || [])
+            .map((task) => parseCell(task))
+            .filter((cell) => Array.isArray(cell) && cell.length === 2);
+          assignments[robotKey] = parsedTasks;
+          if (canonical && canonical !== robotKey) {
+            assignments[canonical] = parsedTasks;
+          }
+        });
+        setRobotTaskAssignments(assignments);
+        setRobotTaskIndices(new Array(robots.length).fill(0));
+        setIsReplanning(new Array(robots.length).fill(false));
+        return data;
+      } catch (err) {
+        console.error("planTasks failed", err);
+        setStatus("error");
+        throw err;
+      }
+    },
+    [grid, optimizer, resetSimulationUi, robots, selectedAlg, tasks]
+  );
+
+  const computePathsAndSchedule = useCallback(async () => {
+    resetSimulationUi({ clearAssignments: false });
     setStatus("computing paths");
     try {
-      const assignment = await planTasks();
+      const assignment = await planTasks({ skipReset: true });
       const robotPlans = {};
       robots.forEach((robot) => {
         const key = JSON.stringify(robot);
@@ -1306,7 +1343,7 @@ export default function App() {
       console.error("computePaths failed", err);
       setStatus("error");
     }
-  }
+  }, [grid, moving, planTasks, resetSimulationUi, robots, selectedAlg]);
 
   const handleReplanning = useCallback(
     async (robotIdx, robotKey) => {
@@ -1353,17 +1390,6 @@ export default function App() {
     },
     [grid, moving, paths, robotTaskAssignments, robotTaskIndices, isReplanning]
   );
-
-  const stopAnimation = useCallback(() => {
-    if (rafRef.current) cancelAnimationFrame(rafRef.current);
-    rafRef.current = null;
-    setSimPlaying(false);
-    if (paths && Object.keys(paths).length > 0) {
-      setStatus("scheduled");
-    } else {
-      setStatus("idle");
-    }
-  }, [paths]);
 
   const startAnimation = useCallback(
     (pathsObj) => {
@@ -1919,7 +1945,7 @@ export default function App() {
           <button className="small" onClick={generateMap}>
             Regenerate
           </button>
-          <button className="small" onClick={planTasks}>
+          <button className="small" onClick={() => planTasks()}>
             Plan Tasks
           </button>
           <button className="small" onClick={computePathsAndSchedule}>
