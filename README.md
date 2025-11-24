@@ -8,6 +8,8 @@ Link Demo (Youtube): [LINK YOUTUBE]
 
 Link PPT (Canva): [LINK CANVA](https://www.canva.com/design/DAG26Iuv2ZQ/L2qR5LGj9jwk81_2x2BGeA/view?utm_content=DAG26Iuv2ZQ&utm_campaign=designshare&utm_medium=link2&utm_source=sharebutton)
 
+Link Website Proyek: [LINK WEBSITE](http://157.230.46.154:8080/)
+
 | Nama   | NRP   |
 | ------ | ----- |
 | Raynald Ramadhani Fachriansyah | 5025241020 |
