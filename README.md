@@ -22,4 +22,4 @@ Checklist yang di submit:
 
 - [x] PPT
   
-- [ ] Video demo (wajib oncam full team)
+- [x] Video demo (wajib oncam full team)
