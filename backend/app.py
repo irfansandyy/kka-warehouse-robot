@@ -1,7 +1,8 @@
-from flask import Flask, request, jsonify
-from flask_cors import CORS
+import os
 import random
 import time
+from flask import Flask, request, jsonify
+from flask_cors import CORS
 
 from kka_backend.config import (
     DEFAULT_MOVING_RANGE,
@@ -539,4 +540,5 @@ def api_manual_apply():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5001, debug=True)
+    debug_mode = os.environ.get("FLASK_DEBUG") in {"1", "true", "True"}
+    app.run(host="0.0.0.0", port=5001, debug=debug_mode)

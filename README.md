@@ -1,1 +1,0 @@
-# kka-warehouse-robot

@@ -1,73 +1,11 @@
-# --- Global/OS ---
-.DS_Store
-Thumbs.db
-*.swp
-*.swo
-
-# --- Python / Flask ---
 __pycache__/
-*.py[cod]
-*$py.class
-*.pyo
-*.pyd
-
-# Virtual environments
 .venv/
-venv/
-env/
-ENV/
 .python-version
-
-# Flask/Runtime
 instance/
 .flaskenv
 *.log
-
-# Packaging/Build
 build/
-dist/
-.eggs/
-*.egg-info/
-*.egg
-wheels/
-share/python-wheels/
-MANIFEST
-pip-wheel-metadata/
-
-# Caches
-.cache/
-.pytest_cache/
-.mypy_cache/
-.pytype/
-.ruff_cache/
-
-# Coverage/Testing
-.coverage
-coverage.xml
-htmlcov/
-
-# --- Node / React (pnpm) ---
 node_modules/
-.pnpm-store/
-.pnpm-debug.log*
-pnpm-debug.log*
 npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-
-# React build/test artifacts
-frontend/build/
-frontend/dist/
-coverage/
-.parcel-cache/
-
-# Env files (keep root .env tracked only if you want; usually ignored)
 .env
-.env.local
-.env.development.local
-.env.test.local
-.env.production.local
-
-# --- Editor/IDE ---
 .vscode/
-.idea/
