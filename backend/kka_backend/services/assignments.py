@@ -1,10 +1,12 @@
 import math
 import random
-from typing import Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from kka_backend.config import ROBOT_COLORS
 from kka_backend.services.paths import PathLibrary
 from kka_backend.utils.geometry import euclidean
+
+ProgressCallback = Optional[Callable[[str, Dict[str, Any]], None]]
 
 
 def analyze_reachability(
@@ -41,7 +43,24 @@ def greedy_assign(
     tasks: Sequence[Tuple[int, int]],
     alg: str,
     planner: PathLibrary,
+    progress_cb: ProgressCallback = None,
 ) -> Dict[Tuple[int, int], List[Tuple[int, int]]]:
+    total_tasks = max(1, len(tasks))
+    assigned_count = 0
+
+    def emit(robot: Tuple[int, int], task: Tuple[int, int], remaining: int) -> None:
+        if progress_cb:
+            progress_cb(
+                "greedy_assign",
+                {
+                    "robot": robot,
+                    "task": task,
+                    "completed": assigned_count,
+                    "total": total_tasks,
+                    "remaining": remaining,
+                },
+            )
+
     remaining = list(tasks)
     assigned = {r: [] for r in robots}
     robot_pos = {r: r for r in robots}
@@ -69,6 +88,8 @@ def greedy_assign(
         assigned[r].append(t)
         robot_pos[r] = t
         remaining.remove(t)
+        assigned_count += 1
+        emit(r, t, len(remaining))
     return assigned
 
 
@@ -81,6 +102,7 @@ def ga_assign(
     pop: int = 40,
     gens: int = 80,
     pmut: float = 0.3,
+    progress_cb: ProgressCallback = None,
 ) -> Dict[Tuple[int, int], List[Tuple[int, int]]]:
     if not tasks:
         return {r: [] for r in robots}
@@ -159,10 +181,31 @@ def ga_assign(
     while len(population) < pop:
         population.append(random_chrom())
 
-    for _ in range(gens):
+    for generation in range(1, gens + 1):
+        if progress_cb:
+            progress_cb(
+                "ga_generation",
+                {
+                    "phase": "start",
+                    "generation": generation,
+                    "total_generations": gens,
+                },
+            )
         next_population: List[List[Tuple[int, int]]] = []
         elite = min(population, key=fitness)
+        if progress_cb:
+            progress_cb(
+                "ga_generation",
+                {
+                    "phase": "end",
+                    "generation": generation,
+                    "total_generations": gens,
+                    "best_cost": fitness(elite),
+                },
+            )
         next_population.append(elite[:])
+        produced = 0
+        emit_every = max(1, pop // 5)
         while len(next_population) < pop:
             parent1 = tournament(population)
             parent2 = tournament(population)
@@ -170,6 +213,17 @@ def ga_assign(
             if rng.random() < pmut:
                 mutate(child)
             next_population.append(child)
+            produced += 1
+            if progress_cb and (produced == pop - 1 or produced % emit_every == 0):
+                progress_cb(
+                    "ga_generation_step",
+                    {
+                        "generation": generation,
+                        "total_generations": gens,
+                        "produced": produced,
+                        "population": pop,
+                    },
+                )
         population = next_population
 
     best = min(population, key=fitness)
@@ -187,6 +241,7 @@ def local_search_assign(
     alg: str,
     planner: PathLibrary,
     iters: int = 2000,
+    progress_cb: ProgressCallback = None,
 ) -> Dict[Tuple[int, int], List[Tuple[int, int]]]:
     assigned = greedy_assign(grid, robots, tasks, alg, planner)
     flat = []
@@ -224,7 +279,9 @@ def local_search_assign(
     best = current[:]
     best_score = current_score
 
-    for _ in range(iters):
+    report_every = max(1, iters // 100)
+
+    for iteration in range(1, iters + 1):
         candidate = current[:]
         if len(candidate) >= 2:
             i, j = rng.sample(range(len(candidate)), 2)
@@ -240,6 +297,16 @@ def local_search_assign(
             if val < best_score:
                 best = candidate
                 best_score = val
+        if progress_cb and (iteration == 1 or iteration == iters or iteration % report_every == 0):
+            progress_cb(
+                "local_search_iteration",
+                {
+                    "iteration": iteration,
+                    "total_iterations": iters,
+                    "best_score": best_score,
+                    "current_score": current_score,
+                },
+            )
 
     parts = split(best)
     out = {}

@@ -1,13 +1,18 @@
 import axios from "axios";
-import { API_BASE } from "../constants/config";
+import { API_BASE, API_TIMEOUT } from "../constants/config";
 
 const client = axios.create({
   baseURL: API_BASE,
-  timeout: 30000,
+  timeout: API_TIMEOUT,
 });
 
 async function post(path, payload) {
   const response = await client.post(path, payload);
+  return response.data;
+}
+
+async function get(path) {
+  const response = await client.get(path);
   return response.data;
 }
 
@@ -17,4 +22,6 @@ export const backendApi = {
   computePaths: (payload) => post("/compute_paths", payload),
   replan: (payload) => post("/replan", payload),
   applyManualEdits: (payload) => post("/manual/apply", payload),
+  startProgress: (payload) => post("/progress/start", payload),
+  getProgress: (jobId) => get(`/progress/${jobId}`),
 };

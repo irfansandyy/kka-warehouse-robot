@@ -9,13 +9,22 @@ import { PerformancePanel } from "./components/PerformancePanel";
 import { RobotDetailModal } from "./components/RobotDetailModal";
 import { RobotLegend } from "./components/RobotLegend";
 import { RobotSummaryList } from "./components/RobotSummaryList";
+import { ActionProgressPanel } from "./components/ActionProgressPanel";
 import { MAX_HEIGHT, MAX_ROBOTS, MAX_WIDTH, COLORS } from "./constants/config";
 import { useManualEdits } from "./hooks/useManualEdits";
+import { useProgressBars } from "./hooks/useProgressBars";
 import { backendApi } from "./services/backendApi";
 import { canonicalKey, cellKey, parseCell } from "./utils/cells";
 import { estimateWalkableCells, computeTaskCap, computeMovingCap } from "./utils/density";
 import { buildMetricCards, formatCell, prettifyLabel } from "./utils/formatters";
 import { clampNumber } from "./utils/numbers";
+
+const ACTION_PROGRESS_DESCRIPTORS = [
+  { key: "generate", label: "Generating map..." },
+  { key: "plan", label: "Planning tasks..." },
+  { key: "compute", label: "Computing paths..." },
+];
+const ACTION_PROGRESS_KEYS = ACTION_PROGRESS_DESCRIPTORS.map((item) => item.key);
 
 export default function App() {
   const [grid, setGrid] = useState(Array.from({ length: 20 }, () => Array(30).fill(0)));
@@ -47,6 +56,8 @@ export default function App() {
   const [selectedRobotKey, setSelectedRobotKey] = useState(null);
   const [stepMetadata, setStepMetadata] = useState({});
   const [metricDetail, setMetricDetail] = useState(null);
+  const [lastPlanResult, setLastPlanResult] = useState(null);
+  const [planDirty, setPlanDirty] = useState(true);
 
   const [mapWidth, setMapWidth] = useState(30);
   const [mapHeight, setMapHeight] = useState(20);
@@ -79,6 +90,137 @@ export default function App() {
     handleForkliftShortcut,
     resetManualEdits,
   } = useManualEdits({ grid, robots, tasks, moving, isEditMode });
+
+  const { progressState, startProgress, updateProgress, finishProgress } = useProgressBars(
+    ACTION_PROGRESS_KEYS
+  );
+
+  const planVersionRef = useRef(0);
+  const progressTimersRef = useRef({});
+  const progressJobsRef = useRef({});
+
+  const invalidatePlan = useCallback(() => {
+    planVersionRef.current += 1;
+    setPlanDirty(true);
+    setLastPlanResult(null);
+  }, []);
+
+  const clearProgressTimer = useCallback((key) => {
+    const timer = progressTimersRef.current[key];
+    if (timer && typeof window !== "undefined") {
+      window.clearInterval(timer);
+    }
+    delete progressTimersRef.current[key];
+  }, []);
+
+  const handleRemoteProgress = useCallback(
+    (key, entry) => {
+      if (!entry) return;
+      const currentJobId = progressJobsRef.current[key];
+      if (currentJobId && entry.id && entry.id !== currentJobId) {
+        return;
+      }
+      updateProgress(key, entry.percent ?? 0, entry.message || entry.label);
+      if (entry.status === "success") {
+        finishProgress(key, { label: entry.message || entry.label || "Completed" });
+        clearProgressTimer(key);
+        if (currentJobId && entry.id === currentJobId) {
+          delete progressJobsRef.current[key];
+        }
+      } else if (entry.status === "error") {
+        finishProgress(key, { label: entry.error || entry.message || "Failed", error: true });
+        clearProgressTimer(key);
+        if (currentJobId && entry.id === currentJobId) {
+          delete progressJobsRef.current[key];
+        }
+      }
+    },
+    [updateProgress, finishProgress, clearProgressTimer]
+  );
+
+  const pollProgressJob = useCallback(
+    (key, jobId) => {
+      if (!jobId || typeof window === "undefined") return;
+      const tick = async () => {
+        if (progressJobsRef.current[key] !== jobId) {
+          clearProgressTimer(key);
+          return;
+        }
+        try {
+          const res = await backendApi.getProgress(jobId);
+          if (res?.ok && res.progress) {
+            handleRemoteProgress(key, res.progress);
+            if (res.progress.status !== "running") {
+              clearProgressTimer(key);
+            }
+          }
+        } catch (error) {
+          console.warn("progress poll failed", error);
+        }
+      };
+      tick();
+      clearProgressTimer(key);
+      progressTimersRef.current[key] = window.setInterval(tick, 900);
+    },
+    [handleRemoteProgress, clearProgressTimer]
+  );
+
+  const beginProgressJob = useCallback(
+    async (key, action, label) => {
+      startProgress(key, label, { autoTick: false, initialValue: 0 });
+      try {
+        const res = await backendApi.startProgress({ action, label });
+        if (res?.ok && res.progress?.id) {
+          const entry = res.progress;
+          progressJobsRef.current[key] = entry.id;
+          handleRemoteProgress(key, entry);
+          pollProgressJob(key, entry.id);
+          return entry.id;
+        }
+      } catch (error) {
+        console.error(`Failed to start progress for ${action}`, error);
+      }
+      return null;
+    },
+    [startProgress, handleRemoteProgress, pollProgressJob]
+  );
+
+  const finalizeProgressJob = useCallback(
+    async (key, jobId, fallbackLabel, options = {}) => {
+      const { error = false } = options;
+      if (!jobId) {
+        finishProgress(key, { label: fallbackLabel, error });
+        return;
+      }
+      try {
+        const res = await backendApi.getProgress(jobId);
+        if (res?.ok && res.progress) {
+          handleRemoteProgress(key, res.progress);
+          if (res.progress.status === "running") {
+            finishProgress(key, { label: fallbackLabel, error });
+          }
+        } else {
+          finishProgress(key, { label: fallbackLabel, error });
+        }
+      } catch (err) {
+        finishProgress(key, { label: fallbackLabel, error });
+      } finally {
+        clearProgressTimer(key);
+        if (progressJobsRef.current[key] === jobId) {
+          delete progressJobsRef.current[key];
+        }
+      }
+    },
+    [handleRemoteProgress, finishProgress, clearProgressTimer]
+  );
+
+  useEffect(() => {
+    return () => {
+      Object.keys(progressTimersRef.current).forEach((key) => {
+        clearProgressTimer(key);
+      });
+    };
+  }, [clearProgressTimer]);
 
   const rafRef = useRef(null);
   const timeRef = useRef([]);
@@ -222,7 +364,12 @@ export default function App() {
     });
   }, [dynamicMovingMax]);
 
+  useEffect(() => {
+    invalidatePlan();
+  }, [optimizer, selectedAlg, invalidatePlan]);
+
   const generateMap = useCallback(async () => {
+    const progressId = await beginProgressJob("generate", "generate_map", "Generating map…");
     setStatus("generating");
     try {
       const payload = {
@@ -234,7 +381,10 @@ export default function App() {
         moving_count_range: movingRange,
         robot_count_range: robotRange,
       };
-      const data = await backendApi.generateMap(payload);
+      const data = await backendApi.generateMap({ ...payload, progress_id: progressId });
+      if (!progressId) {
+        updateProgress("generate", 55, "Applying new layout…");
+      }
       const nextGrid = data.grid || [];
       const nextTasks = data.tasks || [];
       const nextRobots = data.robots || [];
@@ -266,11 +416,17 @@ export default function App() {
       setGlobalSimTime(0);
       setForkliftPositions(nextMoving.map((ob) => (ob?.path && ob.path.length ? ob.path[0] : null)));
       setStatus("ready");
+      invalidatePlan();
+      await finalizeProgressJob("generate", progressId, "Map ready");
     } catch (err) {
       console.error("generateMap failed", err);
       setStatus("error");
+      await finalizeProgressJob("generate", progressId, "Failed to generate map", { error: true });
     }
   }, [
+    beginProgressJob,
+    finalizeProgressJob,
+    invalidatePlan,
     clampSize,
     mapWidth,
     mapHeight,
@@ -280,6 +436,7 @@ export default function App() {
     movingRange,
     robotRange,
     resetManualEdits,
+    updateProgress,
   ]);
 
   useEffect(() => {
@@ -303,14 +460,16 @@ export default function App() {
   }, [paths]);
 
   const resetSimulationUi = useCallback(
-    ({ clearAssignments = false } = {}) => {
+    ({ clearAssignments = false, clearStats = true } = {}) => {
       stopAnimation();
       setPaths({});
       setStepMetadata({});
       setRobotLogs({});
       setSelectedRobotKey(null);
       setMetricDetail(null);
-      setStats({});
+      if (clearStats) {
+        setStats({});
+      }
       completedTasksRef.current = new Set();
       setCompletedTasks(new Set());
       if (clearAssignments) {
@@ -340,11 +499,19 @@ export default function App() {
 
   const planTasks = useCallback(
     async (options = {}) => {
-      const { skipReset = false } = options;
+      const { skipReset = false, showProgress = true, force = false } = options;
+      if (!force && !planDirty && lastPlanResult) {
+        return lastPlanResult;
+      }
       if (!skipReset) {
         resetSimulationUi({ clearAssignments: true });
       }
+      let planProgressId = null;
+      if (showProgress) {
+        planProgressId = await beginProgressJob("plan", "plan_tasks", "Analyzing robots and tasks…");
+      }
       setStatus("planning");
+      const planVersionAtStart = planVersionRef.current;
       try {
         const payload = {
           grid,
@@ -353,7 +520,10 @@ export default function App() {
           optimizer,
           path_alg: selectedAlg === "astar" ? "astar" : "dijkstra",
         };
-        const data = await backendApi.planTasks(payload);
+        const data = await backendApi.planTasks({ ...payload, progress_id: planProgressId });
+        if (showProgress && !planProgressId) {
+          updateProgress("plan", 55, "Compiling assignments…");
+        }
         setStatus("planned");
         setRobotSummaries(data.robots || []);
         setTaskAssignments(data.task_assignments || {});
@@ -380,21 +550,50 @@ export default function App() {
         setRobotTaskAssignments(assignments);
         setRobotTaskIndices(new Array(robots.length).fill(0));
         setIsReplanning(new Array(robots.length).fill(false));
+        if (planVersionAtStart === planVersionRef.current) {
+          setLastPlanResult(data);
+          setPlanDirty(false);
+        }
+        if (showProgress) {
+          await finalizeProgressJob("plan", planProgressId, "Plan ready");
+        }
         return data;
       } catch (err) {
         console.error("planTasks failed", err);
         setStatus("error");
+        if (showProgress) {
+          await finalizeProgressJob("plan", planProgressId, "Planning failed", { error: true });
+        }
         throw err;
       }
     },
-    [grid, optimizer, resetSimulationUi, robots, selectedAlg, tasks]
+    [
+      beginProgressJob,
+      finalizeProgressJob,
+      grid,
+      optimizer,
+      resetSimulationUi,
+      robots,
+      selectedAlg,
+      tasks,
+      planDirty,
+      lastPlanResult,
+      updateProgress,
+    ]
   );
 
   const computePathsAndSchedule = useCallback(async () => {
-    resetSimulationUi({ clearAssignments: false });
+    resetSimulationUi({ clearAssignments: false, clearStats: false });
     setStatus("computing paths");
+    const computeProgressId = await beginProgressJob("compute", "compute_paths", "Computing robot paths…");
     try {
-      const assignment = await planTasks({ skipReset: true });
+      let assignment = lastPlanResult;
+      if (!assignment || planDirty) {
+        assignment = await planTasks({ skipReset: true, showProgress: false });
+      }
+      if (!computeProgressId) {
+        updateProgress("compute", 35, "Generating waypoint paths…");
+      }
       const robotPlans = {};
       robots.forEach((robot) => {
         const key = JSON.stringify(robot);
@@ -419,13 +618,17 @@ export default function App() {
         alg: selectedAlg === "astar" ? "astar" : "dijkstra",
         moving,
       };
-      const data = await backendApi.computePaths(payload);
+      const data = await backendApi.computePaths({ ...payload, progress_id: computeProgressId });
       if (!data.ok) {
         alert(`Compute paths failed: ${JSON.stringify(data)}`);
         setStatus("error");
+        await finalizeProgressJob("compute", computeProgressId, "Compute failed", { error: true });
         return;
       }
 
+      if (!computeProgressId) {
+        updateProgress("compute", 75, "Scheduling robots…");
+      }
       const rawPaths = data.scheduled_paths && Object.keys(data.scheduled_paths).length
         ? data.scheduled_paths
         : data.paths;
@@ -447,11 +650,25 @@ export default function App() {
       }));
       setStepMetadata(data.step_metadata || {});
       setRobotLogs({});
+      await finalizeProgressJob("compute", computeProgressId, "Paths scheduled");
     } catch (err) {
       console.error("computePaths failed", err);
       setStatus("error");
+      await finalizeProgressJob("compute", computeProgressId, "Compute failed", { error: true });
     }
-  }, [grid, moving, planTasks, resetSimulationUi, robots, selectedAlg]);
+  }, [
+    beginProgressJob,
+    grid,
+    moving,
+    planDirty,
+    planTasks,
+    lastPlanResult,
+    finalizeProgressJob,
+    resetSimulationUi,
+    robots,
+    selectedAlg,
+    updateProgress,
+  ]);
 
   const handleReplanning = useCallback(
     async (robotIdx, robotKey) => {
@@ -802,11 +1019,12 @@ export default function App() {
       completedTasksRef.current = new Set();
       setCompletedTasks(new Set());
       setStatus("edits applied");
+      invalidatePlan();
     } catch (err) {
       console.error("manual apply failed", err);
       setStatus("error");
     }
-  }, [grid, robots, tasks, moving, manualEdits, resetManualEdits, hasPendingChanges]);
+  }, [grid, robots, tasks, moving, manualEdits, resetManualEdits, hasPendingChanges, invalidatePlan]);
 
   const prevEditModeRef = useRef(isEditMode);
   useEffect(() => {
@@ -833,7 +1051,7 @@ export default function App() {
         <ControlBar
           onOpenSettings={() => setShowSettings(true)}
           onGenerateMap={generateMap}
-          onPlanTasks={() => planTasks()}
+          onPlanTasks={() => planTasks({ force: true })}
           onComputePaths={computePathsAndSchedule}
           optimizer={optimizer}
           onOptimizerChange={setOptimizer}
@@ -852,6 +1070,7 @@ export default function App() {
           onToggleEditMode={() => setIsEditMode((prev) => !prev)}
           status={status}
         />
+        <ActionProgressPanel progress={progressState} descriptors={ACTION_PROGRESS_DESCRIPTORS} />
         <div className="canvas-shell">
           <CanvasGrid
             grid={grid}

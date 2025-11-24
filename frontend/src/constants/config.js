@@ -1,4 +1,5 @@
 const API_BASE = process.env.REACT_APP_BACKEND_URL || "http://localhost:5001/api";
+const API_TIMEOUT = Number(process.env.REACT_APP_API_TIMEOUT || 900000) || 900000;
 const COLORS = ["#0b69ff", "#ff5f55", "#2dbf88", "#e2a72e", "#7b5fff"];
 const COMPLETED_COLOR = "#25a86b";
 const MAX_ROBOTS = 5;
@@ -10,6 +11,7 @@ const FORKLIFT_MAX_STEPS = 100;
 
 export {
   API_BASE,
+  API_TIMEOUT,
   COLORS,
   COMPLETED_COLOR,
   MAX_ROBOTS,
