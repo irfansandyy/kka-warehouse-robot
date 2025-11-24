@@ -4,7 +4,7 @@
 
 Kelompok: 09
 
-Link Demo (Youtube): [LINK YOUTUBE]
+Link Demo (Youtube): [LINK YOUTUBE](https://youtu.be/uaLYSbWeh2s)
 
 Link PPT (Canva): [LINK CANVA](https://www.canva.com/design/DAG26Iuv2ZQ/L2qR5LGj9jwk81_2x2BGeA/view?utm_content=DAG26Iuv2ZQ&utm_campaign=designshare&utm_medium=link2&utm_source=sharebutton)
 
