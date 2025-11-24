@@ -1,0 +1,21 @@
+const API_BASE = process.env.REACT_APP_BACKEND_URL || "http://localhost:5001/api";
+const COLORS = ["#0b69ff", "#ff5f55", "#2dbf88", "#e2a72e", "#7b5fff"];
+const COMPLETED_COLOR = "#25a86b";
+const MAX_ROBOTS = 5;
+const MAX_WIDTH = 200;
+const MAX_HEIGHT = 200;
+const EXECUTION_DETAIL_INLINE_LIMIT = 3;
+const FORKLIFT_MIN_STEPS = 20;
+const FORKLIFT_MAX_STEPS = 100;
+
+export {
+  API_BASE,
+  COLORS,
+  COMPLETED_COLOR,
+  MAX_ROBOTS,
+  MAX_WIDTH,
+  MAX_HEIGHT,
+  EXECUTION_DETAIL_INLINE_LIMIT,
+  FORKLIFT_MIN_STEPS,
+  FORKLIFT_MAX_STEPS,
+};
